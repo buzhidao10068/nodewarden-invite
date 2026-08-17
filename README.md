@@ -1,6 +1,6 @@
 # NodeLoc 邀请码自动发放
 
-Cloudflare Workers + TypeScript + D1/KV 的申请系统。Worker 每半小时访问一次 NodeLoc `latest.json` 以维持会话；每天北京时间 08:00 通过 NodeLoc 创建 3 张单次使用、有效至 9999-12-31 的邀请码，存入 D1 邀请码池；申请文字经 OpenAI 兼容接口审核后，按邀请码最早入池的顺序发放。
+Cloudflare Workers + TypeScript + D1/KV 的申请系统。Worker 每半小时访问一次 NodeLoc `latest.json` 以维持会话；每天北京时间 08:00 通过 NodeLoc 创建 3 张单次使用、有效至 9999-12-31 的邀请码，存入 D1 邀请码池；申请文字经 OpenAI 兼容接口审核后，按邀请码最早入池的顺序发放，并在成功发放 1 小时后自动删除。
 
 ## 部署
 

@@ -84,3 +84,23 @@ CREATE TABLE IF NOT EXISTS nodeloc_session (
   encrypted_csrf_token TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS managed_invites (
+  invite_key TEXT PRIMARY KEY,
+  remote_invite_id INTEGER NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invite_deletions (
+  invite_key TEXT PRIMARY KEY REFERENCES managed_invites(invite_key),
+  remote_invite_id INTEGER NOT NULL,
+  application_id TEXT NOT NULL UNIQUE REFERENCES applications(id),
+  delete_after TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'deleted')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS invite_deletions_due ON invite_deletions(state, delete_after);

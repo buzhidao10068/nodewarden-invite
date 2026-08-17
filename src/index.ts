@@ -182,7 +182,7 @@ async function reviewApplication(text: string, env: Env): Promise<AiDecision> {
   return { approved: value.approved, reason: value.reason.slice(0, 500) };
 }
 
-async function createInvite(env: Env, expires: string, redemptions: string): Promise<{ link: string; invite_key: string }> {
+async function createInvite(env: Env, expires: string, redemptions: string): Promise<{ link: string; invite_key: string; remoteInviteId: number }> {
   const session = await activeNodeLocSession(env);
   const form = new URLSearchParams({ max_redemptions_allowed: redemptions, expires_at: expires });
   const response = await fetch("https://www.nodeloc.com/invites", {
@@ -202,12 +202,84 @@ async function createInvite(env: Env, expires: string, redemptions: string): Pro
     body: form.toString(),
   });
   if (!response.ok) throw new Error(`NodeLoc returned ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  const invite = await response.json() as { link?: unknown; invite_key?: unknown };
-  if (typeof invite.link !== "string" || typeof invite.invite_key !== "string") throw new Error("NodeLoc returned malformed invite");
-  return { link: invite.link, invite_key: invite.invite_key };
+  const payload = await response.json() as { invite?: unknown; link?: unknown; invite_key?: unknown; id?: unknown };
+  const invite = payload.invite && typeof payload.invite === "object" ? payload.invite as { link?: unknown; invite_key?: unknown; id?: unknown } : payload;
+  const remoteInviteId = typeof invite.id === "number" ? invite.id : typeof invite.id === "string" && /^\d+$/.test(invite.id) ? Number(invite.id) : null;
+  if (typeof invite.link !== "string" || typeof invite.invite_key !== "string" || !remoteInviteId) throw new Error("NodeLoc returned malformed invite");
+  return { link: invite.link, invite_key: invite.invite_key, remoteInviteId };
 }
 
-type PoolInvite = { id: number; invite_link: string; invite_key: string };
+type PoolInvite = { id: number; invite_link: string; invite_key: string; remote_invite_id: number | null };
+type PendingDeletion = { invite_key: string; remote_invite_id: number };
+
+async function resolveRemoteInviteId(inviteKey: string, env: Env): Promise<number | null> {
+  const session = await activeNodeLocSession(env);
+  const headers = { accept: "application/json", cookie: session.cookie, "user-agent": "Mozilla/5.0 (compatible; NodeLocInviteWorker/1.0)" };
+  const currentUser = await fetch("https://www.nodeloc.com/session/current.json", { headers });
+  if (!currentUser.ok) throw new Error(`NodeLoc current session returned ${currentUser.status}`);
+  const currentPayload = await currentUser.json() as { current_user?: { username?: unknown } };
+  const username = currentPayload.current_user?.username;
+  if (typeof username !== "string" || !username) throw new Error("NodeLoc current session has no username");
+  for (let offset = 0; offset <= 500; offset += 50) {
+    const url = new URL(`https://www.nodeloc.com/u/${encodeURIComponent(username)}/invited.json`);
+    url.searchParams.set("filter", "pending"); url.searchParams.set("offset", String(offset));
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`NodeLoc invite list returned ${response.status}`);
+    const payload = await response.json() as { invites?: Array<{ id?: unknown; invite_key?: unknown; link?: unknown }> };
+    const invites = payload.invites ?? [];
+    const matched = invites.find((invite) => invite.invite_key === inviteKey || (typeof invite.link === "string" && invite.link.includes(inviteKey)));
+    if (matched) {
+      const id = typeof matched.id === "number" ? matched.id : typeof matched.id === "string" && /^\d+$/.test(matched.id) ? Number(matched.id) : null;
+      if (id) {
+        await env.DB.prepare("INSERT OR REPLACE INTO managed_invites (invite_key, remote_invite_id, created_at) VALUES (?, ?, ?)").bind(inviteKey, id, new Date().toISOString()).run();
+        return id;
+      }
+    }
+    if (invites.length < 50) break;
+  }
+  return null;
+}
+
+async function deleteInvite(remoteInviteId: number, env: Env): Promise<void> {
+  const session = await activeNodeLocSession(env);
+  const response = await fetch("https://www.nodeloc.com/invites", {
+    method: "DELETE",
+    headers: {
+      accept: "application/json, text/javascript, */*; q=0.01",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      cookie: session.cookie,
+      origin: "https://www.nodeloc.com",
+      referer: "https://www.nodeloc.com/",
+      "user-agent": "Mozilla/5.0 (compatible; NodeLocInviteWorker/1.0)",
+      "x-csrf-token": session.csrfToken,
+      "x-requested-with": "XMLHttpRequest",
+      "discourse-logged-in": "true",
+      "discourse-present": "true",
+    },
+    body: new URLSearchParams({ id: String(remoteInviteId) }).toString(),
+  });
+  if (response.ok || response.status === 404) return;
+  throw new Error(`NodeLoc invite deletion returned ${response.status}`);
+}
+
+async function deleteExpiredInvites(env: Env): Promise<void> {
+  const now = new Date().toISOString();
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const candidates = await env.DB.prepare("SELECT invite_key, remote_invite_id FROM invite_deletions WHERE (state = 'pending' AND delete_after <= ?) OR (state = 'processing' AND updated_at <= ?) ORDER BY delete_after ASC LIMIT 20").bind(now, stale).all<PendingDeletion>();
+  for (const candidate of candidates.results) {
+    const claimed = await env.DB.prepare("UPDATE invite_deletions SET state = 'processing', updated_at = ? WHERE invite_key = ? AND (state = 'pending' OR (state = 'processing' AND updated_at <= ?))").bind(now, candidate.invite_key, stale).run();
+    if (claimed.meta.changes !== 1) continue;
+    try {
+      await deleteInvite(candidate.remote_invite_id, env);
+      const completedAt = new Date().toISOString();
+      await env.DB.prepare("UPDATE invite_deletions SET state = 'deleted', deleted_at = ?, updated_at = ?, last_error = NULL WHERE invite_key = ?").bind(completedAt, completedAt, candidate.invite_key).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 500) : "unknown";
+      console.error("NodeLoc invite deletion failed", { inviteKey: candidate.invite_key, message });
+      await env.DB.prepare("UPDATE invite_deletions SET state = 'pending', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE invite_key = ?").bind(message, new Date().toISOString(), candidate.invite_key).run();
+    }
+  }
+}
 
 async function fillDailyInvitePool(env: Env): Promise<void> {
   const day = beijingDay();
@@ -219,6 +291,7 @@ async function fillDailyInvitePool(env: Env): Promise<void> {
       const invite = await createInvite(env, "9999-12-31 23:59+08:00", "1");
       await env.DB.batch([
         env.DB.prepare("INSERT INTO invite_pool (source_day, slot, invite_key, invite_link, fetched_at) VALUES (?, ?, ?, ?, ?)").bind(day, slot, invite.invite_key, invite.link, new Date().toISOString()),
+        env.DB.prepare("INSERT INTO managed_invites (invite_key, remote_invite_id, created_at) VALUES (?, ?, ?)").bind(invite.invite_key, invite.remoteInviteId, new Date().toISOString()),
         env.DB.prepare("UPDATE pool_generation_slots SET state = 'ready', updated_at = ? WHERE source_day = ? AND slot = ?").bind(new Date().toISOString(), day, slot),
       ]);
     } catch (error) {
@@ -303,7 +376,7 @@ async function handleApplication(request: Request, env: Env): Promise<Response> 
   if (!decision.approved) { await env.DB.prepare("UPDATE applications SET status = 'rejected', ai_approved = 0, ai_reason = ?, completed_at = ? WHERE id = ?").bind(decision.reason, new Date().toISOString(), appId).run(); return json({ message: `未通过审核：${decision.reason}` }, 403); }
   let poolInvite: PoolInvite | null = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const candidate = await env.DB.prepare("SELECT id, invite_link, invite_key FROM invite_pool WHERE application_id IS NULL ORDER BY fetched_at ASC, id ASC LIMIT 1").first<PoolInvite>();
+    const candidate = await env.DB.prepare("SELECT p.id, p.invite_link, p.invite_key, m.remote_invite_id FROM invite_pool p LEFT JOIN managed_invites m ON m.invite_key = p.invite_key WHERE p.application_id IS NULL ORDER BY p.fetched_at ASC, p.id ASC LIMIT 1").first<PoolInvite>();
     if (!candidate) break;
     const allocation = await env.DB.prepare("UPDATE invite_pool SET application_id = ?, claimed_at = ? WHERE id = ? AND application_id IS NULL").bind(appId, new Date().toISOString(), candidate.id).run();
     if (allocation.meta.changes === 1) { poolInvite = candidate; break; }
@@ -313,14 +386,26 @@ async function handleApplication(request: Request, env: Env): Promise<Response> 
     await releaseDailyLocks(env, ipHash, fingerprintHash, day);
     return json({ message: "邀请码池暂时为空；本次未计入申请次数，可稍后重试。" }, 503);
   }
+  let remoteInviteId = poolInvite.remote_invite_id;
+  try { remoteInviteId ??= await resolveRemoteInviteId(poolInvite.invite_key, env); } catch (error) {
+    console.error("NodeLoc invite ID lookup failed", { message: error instanceof Error ? error.message : "unknown" });
+  }
+  if (!remoteInviteId) {
+    await env.DB.prepare("UPDATE invite_pool SET application_id = NULL, claimed_at = NULL WHERE id = ? AND application_id = ?").bind(poolInvite.id, appId).run();
+    await env.DB.prepare("UPDATE applications SET status = 'upstream_failed', ai_approved = 1, ai_reason = ?, completed_at = ? WHERE id = ?").bind("无法确认邀请码删除任务", new Date().toISOString(), appId).run();
+    await releaseDailyLocks(env, ipHash, fingerprintHash, day);
+    return json({ message: "邀请码删除任务暂不可用；本次未计入申请次数，可稍后重试。" }, 503);
+  }
+  const deleteAfter = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   try {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO permanent_success_locks (subject_kind, subject_hash, created_at) VALUES ('ip', ?, ?)").bind(ipHash, now),
       env.DB.prepare("INSERT INTO permanent_success_locks (subject_kind, subject_hash, created_at) VALUES ('fingerprint', ?, ?)").bind(fingerprintHash, now),
       env.DB.prepare("UPDATE applications SET status = 'succeeded', ai_approved = 1, ai_reason = ?, invite_key = ?, completed_at = ? WHERE id = ?").bind(decision.reason, poolInvite.invite_key, new Date().toISOString(), appId),
+      env.DB.prepare("INSERT INTO invite_deletions (invite_key, remote_invite_id, application_id, delete_after, state, attempts, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, ?)").bind(poolInvite.invite_key, remoteInviteId, appId, deleteAfter, new Date().toISOString()),
     ]);
     await Promise.all([env.RATE_LIMIT.put(`permanent:ip:${ipHash}`, "1"), env.RATE_LIMIT.put(`permanent:fp:${fingerprintHash}`, "1")]);
-    return json({ inviteLink: poolInvite.invite_link, message: "审核通过。已按获取顺序从邀请码池发放单次邀请码。" });
+    return json({ inviteLink: poolInvite.invite_link, message: "审核通过。邀请码将在 1 小时后自动删除，请尽快完成注册。" });
   } catch {
     await env.DB.prepare("UPDATE applications SET status = 'upstream_failed', ai_approved = 1, ai_reason = ?, completed_at = ? WHERE id = ?").bind("邀请码已分配，但永久锁记录失败", new Date().toISOString(), appId).run();
     return json({ message: "邀请码已分配但记录失败，为避免重复发放，请勿重试。" }, 502);
@@ -329,6 +414,7 @@ async function handleApplication(request: Request, env: Env): Promise<Response> 
 
 export default { async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
   ctx.waitUntil((async () => {
+    if (controller.cron === "*/5 * * * *") { await deleteExpiredInvites(env); return; }
     try { await refreshNodeLocSession(env); } catch (error) {
       console.error("NodeLoc session refresh failed", { message: error instanceof Error ? error.message : "unknown" });
     }
