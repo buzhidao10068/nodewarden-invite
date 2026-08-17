@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS applications (
 );
 
 CREATE INDEX IF NOT EXISTS applications_created_at ON applications(created_at);
+CREATE INDEX IF NOT EXISTS applications_ai_approved ON applications(ai_approved);
 
 -- 每日北京时间 08:00 创建的一张邀请码；所有当天获批者共享其链接。
 CREATE TABLE IF NOT EXISTS daily_invites (

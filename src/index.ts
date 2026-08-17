@@ -160,6 +160,30 @@ async function refreshNodeLocSession(env: Env): Promise<void> {
   await storeResponseUpdate(poll, "message-bus-poll");
 }
 
+function normalizedTrigrams(text: string): Set<string> {
+  const normalized = text.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+  const characters = [...normalized];
+  const result = new Set<string>();
+  for (let index = 0; index <= characters.length - 3; index += 1) result.add(characters.slice(index, index + 3).join(""));
+  if (result.size === 0 && normalized) result.add(normalized);
+  return result;
+}
+
+function textOverlapRatio(left: string, right: string): number {
+  const leftTrigrams = normalizedTrigrams(left); const rightTrigrams = normalizedTrigrams(right);
+  if (leftTrigrams.size === 0 || rightTrigrams.size === 0) return 0;
+  let shared = 0;
+  for (const trigram of leftTrigrams) if (rightTrigrams.has(trigram)) shared += 1;
+  return shared / Math.min(leftTrigrams.size, rightTrigrams.size);
+}
+
+async function approvedTextDuplicateRatio(text: string, env: Env): Promise<number> {
+  const previous = await env.DB.prepare("SELECT application_text FROM applications WHERE ai_approved = 1").all<{ application_text: string }>();
+  let highest = 0;
+  for (const application of previous.results) highest = Math.max(highest, textOverlapRatio(text, application.application_text));
+  return highest;
+}
+
 async function reviewApplication(text: string, env: Env): Promise<AiDecision> {
   const response = await fetch(env.AI_API_URL, {
     method: "POST",
@@ -367,6 +391,17 @@ async function handleApplication(request: Request, env: Env): Promise<Response> 
     ]);
   } catch { return json({ message: "该 IP 或浏览器今天已经申请过；无论审核结果如何，当天不可重复申请。" }, 429); }
   await Promise.all([env.RATE_LIMIT.put(`daily:ip:${ipHash}:${day}`, "1", { expirationTtl: 172800 }), env.RATE_LIMIT.put(`daily:fp:${fingerprintHash}:${day}`, "1", { expirationTtl: 172800 })]);
+  let duplicateRatio: number;
+  try { duplicateRatio = await approvedTextDuplicateRatio(text, env); } catch {
+    await env.DB.prepare("UPDATE applications SET status = 'upstream_failed', ai_reason = ?, completed_at = ? WHERE id = ?").bind("D1 文本查重服务暂不可用", new Date().toISOString(), appId).run();
+    await releaseDailyLocks(env, ipHash, fingerprintHash, day);
+    return json({ message: "文本查重服务暂不可用；本次未计入申请次数，可稍后重试。" }, 503);
+  }
+  if (duplicateRatio > 0.3) {
+    const percentage = (duplicateRatio * 100).toFixed(1);
+    await env.DB.prepare("UPDATE applications SET status = 'rejected', ai_approved = 0, ai_reason = ?, completed_at = ? WHERE id = ?").bind(`与已通过申请的文本重复率为 ${percentage}%`, new Date().toISOString(), appId).run();
+    return json({ message: `未通过审核：申请文本与已通过内容重复率 ${percentage}%，超过 30%。` }, 403);
+  }
   let decision: AiDecision;
   try { decision = await reviewApplication(text, env); } catch {
     await env.DB.prepare("UPDATE applications SET status = 'upstream_failed', ai_reason = ?, completed_at = ? WHERE id = ?").bind("AI 审核服务暂不可用", new Date().toISOString(), appId).run();
