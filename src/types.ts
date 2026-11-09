@@ -9,6 +9,8 @@ export interface Env {
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   ADMIN_TOKEN?: string;
+  /** web: session API, api: Bearer API, both: enables both. Defaults to both. */
+  ADMIN_ACCESS_MODE?: string;
   ALLOW_INSECURE_LOCAL_DEV?: string;
 }
 

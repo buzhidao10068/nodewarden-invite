@@ -9,7 +9,7 @@
     "database_name": "nodewarden-invite",
     "database_id": "REPLACE_WITH_D1_DATABASE_ID"
   }],
-  "vars": { "TURNSTILE_SITE_KEY": "REPLACE_WITH_TURNSTILE_SITE_KEY" },
+  "vars": { "TURNSTILE_SITE_KEY": "REPLACE_WITH_TURNSTILE_SITE_KEY", "ADMIN_ACCESS_MODE": "both" },
   "triggers": { "crons": [] },
   "keep_vars": true
 }

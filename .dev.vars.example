@@ -1,6 +1,8 @@
 # Required for the application page. Never commit real values.
 HASH_SALT="REPLACE_WITH_32_BYTE_OR_LONGER_RANDOM_SECRET"
 ADMIN_TOKEN="REPLACE_WITH_32_BYTE_OR_LONGER_ADMIN_TOKEN"
+# 可选：web 仅启用网页、api 仅启用 PowerShell/API、both 同时启用（默认 both）。
+ADMIN_ACCESS_MODE="both"
 TURNSTILE_SECRET="REPLACE_WITH_TURNSTILE_SECRET"
 TURNSTILE_SITE_KEY="REPLACE_WITH_TURNSTILE_SITE_KEY"
 # Optional: link a manually emailed invite, inspect/revoke it or ban its usedBy.

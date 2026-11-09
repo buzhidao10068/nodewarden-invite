@@ -1,12 +1,15 @@
 // Derived from hekuo5310/nl-invite-auto (Apache-2.0).
 // Modified for NodeWarden, manual email invitations without Cron, 2026-11-09.
 import { adminRoute } from "./admin.js";
+import { adminPage } from "./admin-page.js";
+import { adminMode, adminSessionRoute } from "./admin-auth.js";
 import { handleApplication, statusRequest } from "./applications.js";
 import { page } from "./page.js";
 import { json, validateConfig } from "./security.js";
 import type { Env } from "./types.js";
 
 export type { Env } from "./types.js";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
@@ -17,7 +20,18 @@ export default {
         "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
         "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
       } });
-      if (url.pathname.startsWith("/internal/")) return await adminRoute(request, env);
+      if (request.method === "GET" && url.pathname === "/admin") {
+        if (adminMode(env) === "api") return new Response("Not found", { status: 404 });
+        const nonce = crypto.randomUUID();
+        return new Response(adminPage(nonce), { headers: {
+          "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-robots-tag": "noindex, nofollow",
+          "content-security-policy": `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+        } });
+      }
+      if (url.pathname === "/admin/api/session") return await adminSessionRoute(request, env);
+      if (url.pathname.startsWith("/admin/api/")) return adminMode(env) === "api" ? new Response("Not found", { status: 404 }) : await adminRoute(request, env);
+      if (url.pathname.startsWith("/internal/")) return adminMode(env) === "web" ? new Response("Not found", { status: 404 }) : await adminRoute(request, env);
       if (request.method === "POST" && ["/api/applications", "/api/applications/status"].includes(url.pathname)) {
         await validateConfig(request, env);
         return url.pathname.endsWith("/status") ? await statusRequest(request, env) : await handleApplication(request, env);

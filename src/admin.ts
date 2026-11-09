@@ -1,6 +1,7 @@
 import { applicationResponse } from "./applications.js";
+import { authenticateAdmin } from "./admin-auth.js";
 import { banUser, findInvite, revokeInvite } from "./nodewarden.js";
-import { decrypt, digest, encrypt, json, readBody, secureMatches } from "./security.js";
+import { decrypt, digest, encrypt, json, readBody } from "./security.js";
 import { load, saveInvite } from "./store.js";
 import type { Env, Invite } from "./types.js";
 
@@ -8,14 +9,17 @@ const audit = (id: string, action: string, env: Env) => env.DB.prepare("INSERT I
   .bind(crypto.randomUUID(), id, action, new Date().toISOString());
 
 export async function adminRoute(request: Request, env: Env): Promise<Response> {
-  const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!token || !env.ADMIN_TOKEN || env.ADMIN_TOKEN.length < 32 || !await secureMatches(token, env.ADMIN_TOKEN)) return new Response("Not found", { status: 404 });
+  if (!await authenticateAdmin(request, env)) return new URL(request.url).pathname.startsWith("/admin/api/")
+    ? json({ message: "管理员会话已过期或未登录，请重新登录。" }, 401) : new Response("Not found", { status: 404 });
   const url = new URL(request.url);
+  url.pathname = url.pathname.replace(/^\/admin\/api\//, "/internal/");
   if (url.pathname === "/internal/applications" && request.method === "GET") {
     const offset = Math.floor(Math.max(0, Math.min(1000000, Number(url.searchParams.get("offset")) || 0)));
+    const status = url.searchParams.get("status");
+    if (status && !["reviewing", "succeeded", "rejected", "failed", "creating", "uncertain"].includes(status)) return json({ message: "申请状态无效。" }, 400);
     const rows = await env.DB.prepare(`SELECT a.id, e.email, a.day, a.status, a.reason, a.error_code, a.expires_at, a.created_at, a.updated_at
       FROM nw_applications a LEFT JOIN nw_application_emails e ON e.application_id = a.id
-      ORDER BY a.created_at DESC, a.id LIMIT 50 OFFSET ?`).bind(offset).all();
+      WHERE (? IS NULL OR a.status = ?) ORDER BY a.created_at DESC, a.id LIMIT 50 OFFSET ?`).bind(status || null, status || null, offset).all();
     return json({ data: rows.results, nextOffset: offset + rows.results.length });
   }
   const match = url.pathname.match(/^\/internal\/applications\/([a-f0-9-]{36})(?:\/(sent|reject|recover|release|revoke|ban))?$/i);
@@ -24,12 +28,15 @@ export async function adminRoute(request: Request, env: Env): Promise<Response> 
   if (!application) return json({ message: "申请不存在。" }, 404);
   if (!match[2] && request.method === "GET") {
     let upstream: Invite | null = null;
+    let upstreamWarning: string | undefined;
     if (application.encrypted_invite) {
-      const saved = await decrypt<Invite>(application.encrypted_invite, application.id, env);
-      upstream = await findInvite(saved.code, env);
+      try {
+        const saved = await decrypt<Invite>(application.encrypted_invite, application.id, env);
+        upstream = await findInvite(saved.code, env);
+      } catch { upstreamWarning = "无法获取关联邀请码的上游状态，请核对 NodeWarden 配置并稍后重试。"; }
     }
     const { encrypted_invite: _encrypted, email_hash: _email, ...details } = application;
-    return json({ application: details, upstream });
+    return json({ application: details, upstream, ...(upstreamWarning ? { upstreamWarning } : {}) });
   }
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
   let body: Record<string, unknown>;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { after, before, beforeEach, test } from "node:test";
 import { Script, runInNewContext } from "node:vm";
@@ -34,6 +34,17 @@ async function request(path, body, { ip = "203.0.113.1", admin = false, method =
   const text = await response.text();
   return { status: response.status, body: response.headers.get("content-type")?.includes("application/json") ? JSON.parse(text) : { message: text } };
 }
+async function browser(path, { instance = mf, cookie, body, method = body === undefined ? "GET" : "POST", origin = "https://invite.test", ip = "203.0.113.10", token } = {}) {
+  const response = await instance.dispatchFetch(`https://invite.test${path}`, { method,
+    headers: { "CF-Connecting-IP": ip, ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}),
+      ...(body === undefined ? {} : { "content-type": "application/json" }), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await response.text();
+  return { status: response.status, headers: response.headers, body: response.headers.get("content-type")?.includes("application/json") ? JSON.parse(text) : text,
+    cookie: response.headers.get("set-cookie")?.split(";")[0] };
+}
+const login = (options = {}) => browser("/admin/api/session", { body: { token: bindings.ADMIN_TOKEN }, ...options });
 const apply = (input, options) => request("/api/applications", input, options);
 const status = (email, options) => request("/api/applications/status", { email }, options);
 const count = async (table) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n;
@@ -321,4 +332,156 @@ test("page submits email and Unicode explanation, queries by email, and contains
   assert.equal(requests[1].url, "/api/applications/status"); assert.deepEqual(requests[1].body, { email: "applicant@example.com" });
   for (const secret of [bindings.NODEWARDEN_CLIENT_SECRET, bindings.NODEWARDEN_MASTER_PASSWORD_HASH, bindings.ADMIN_TOKEN]) assert.ok(!html.includes(secret));
   assert.ok(response.headers.get("content-security-policy").includes("frame-ancestors 'none'"));
+});
+
+test("admin HTML uses per-request CSP nonces and never embeds credentials or applicant data", async () => {
+  const input = submission(); await apply(input);
+  const response = await browser("/admin"), second = await browser("/admin");
+  assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(response.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  const nonce = response.body.match(/<script nonce="([^"]+)">/)[1];
+  assert.ok(response.headers.get("content-security-policy").includes(`'nonce-${nonce}'`));
+  assert.ok(!second.body.includes(nonce));
+  new Script(response.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1]);
+  assert.match(response.body, /管理员登录/); assert.match(response.body, /标记邮件已发送/);
+  for (const secret of [bindings.ADMIN_TOKEN, bindings.NODEWARDEN_CLIENT_SECRET, bindings.NODEWARDEN_MASTER_PASSWORD_HASH, input.email, input.application]) assert.ok(!response.body.includes(secret));
+  assert.ok(!response.body.includes("localStorage")); assert.ok(!response.body.includes("sessionStorage"));
+  assert.equal((await browser("/admin/api/applications")).status, 401);
+  assert.equal((await request("/internal/applications")).status, 404);
+});
+
+test("browser session supports review actions and shares state with the unchanged Bearer API", async () => {
+  const authenticated = await login(); const cookie = authenticated.cookie;
+  assert.equal(authenticated.status, 200); assert.ok(cookie);
+  const setCookie = authenticated.headers.get("set-cookie");
+  for (const flag of ["HttpOnly", "Secure", "SameSite=Strict", "Max-Age=28800", "Path=/"]) assert.ok(setCookie.includes(flag));
+  assert.ok(!setCookie.includes(bindings.ADMIN_TOKEN));
+  assert.equal((await browser("/admin/api/session", { cookie })).status, 200);
+  const first = submission(); await apply(first);
+  const list = await browser("/admin/api/applications?status=reviewing", { cookie });
+  assert.equal(list.body.data[0].email, first.email);
+  const detail = await browser(`/admin/api/applications/${first.applicationId}`, { cookie });
+  assert.equal(detail.body.application.application_text, first.application);
+  const markSent = await browser(`/admin/api/applications/${first.applicationId}/sent`, { cookie, body: { confirm: "INVITATION_EMAIL_SENT", reason: "web note" } });
+  assert.equal(markSent.body.status, "succeeded");
+  assert.equal((await request(`/internal/applications/${first.applicationId}`, undefined, { admin: true })).body.application.reason, "web note");
+  assert.equal((await browser("/admin/api/applications?status=reviewing", { cookie })).body.data.length, 0);
+  const second = submission(); await apply(second, { ip: "203.0.113.2" });
+  assert.equal((await browser(`/admin/api/applications/${second.applicationId}/reject`, { cookie, body: {} })).body.status, "rejected");
+  const third = submission(); await apply(third, { ip: "203.0.113.3" });
+  await db.prepare("UPDATE nw_applications SET created_at = ? WHERE id = ?").bind(new Date(Date.now() - 180000).toISOString(), third.applicationId).run();
+  assert.equal((await browser(`/admin/api/applications/${third.applicationId}/release`, { cookie, body: { confirm: "NO_USABLE_INVITE_REMAINS" } })).status, 200);
+  assert.equal((await record(third)).status, "failed");
+  const logout = await browser("/admin/api/session", { cookie, method: "DELETE" });
+  assert.equal(logout.status, 200); assert.match(logout.headers.get("set-cookie"), /Max-Age=0/);
+  assert.equal((await browser("/admin/api/session", { cookie: logout.cookie })).status, 401);
+  assert.equal((await request("/internal/applications", undefined, { admin: true })).status, 200);
+});
+
+test("admin cookies reject forgery, expiry, cross-origin writes and cross-channel authentication", async () => {
+  const cookie = (await login()).cookie;
+  const input = submission(); await apply(input);
+  const path = `/admin/api/applications/${input.applicationId}/sent`, body = { confirm: "INVITATION_EMAIL_SENT" };
+  assert.equal((await browser(path, { cookie, body, origin: "https://evil.test" })).status, 403);
+  assert.equal((await browser(path, { cookie, body, origin: null })).status, 401);
+  assert.equal((await record(input)).status, "reviewing");
+  assert.equal((await browser("/internal/applications", { cookie })).status, 404);
+  assert.equal((await browser("/admin/api/applications", { token: bindings.ADMIN_TOKEN })).status, 401);
+  const last = cookie.at(-1) === "0" ? "1" : "0";
+  assert.equal((await browser("/admin/api/session", { cookie: cookie.slice(0, -1) + last })).status, 401);
+  const payload = `${Math.floor(Date.now() / 1000) - 1}.${randomUUID()}`;
+  const signature = createHmac("sha256", bindings.ADMIN_TOKEN).update(`nw-admin-session-v1:${payload}`).digest("hex");
+  const cookieKey = cookie.slice(0, cookie.indexOf("="));
+  assert.equal((await browser("/admin/api/session", { cookie: `${cookieKey}=${payload}.${signature}` })).status, 401);
+  assert.equal((await login({ body: { token: "wrong" } })).status, 401);
+  assert.equal((await login({ origin: null })).status, 403);
+  assert.equal((await login({ origin: "https://evil.test" })).status, 403);
+});
+
+test("administrator login is rate limited independently of application submission", async () => {
+  for (let index = 0; index < 5; index++) assert.equal((await login({ body: { token: "incorrect" } })).status, 401);
+  assert.equal((await login()).status, 429);
+  assert.equal((await apply(submission())).body.status, "reviewing");
+});
+
+test("web, api and both modes independently enforce which administrator entry points are enabled", async () => {
+  for (const access of ["web", "api", "both"]) {
+    const instance = new Miniflare({ modules: true, script: workerScript, compatibilityDate: "2026-07-30", d1Databases: ["DB"], bindings: { ...bindings, ADMIN_ACCESS_MODE: access }, log: new NoOpLog() });
+    try {
+      await (await instance.getD1Database("DB")).exec(sql(schema));
+      assert.equal((await browser("/admin", { instance })).status, access === "api" ? 404 : 200);
+      assert.equal((await browser("/internal/applications", { instance, token: bindings.ADMIN_TOKEN })).status, access === "web" ? 404 : 200);
+      const session = await login({ instance });
+      assert.equal(session.status, access === "api" ? 404 : 200);
+      assert.equal((await browser("/admin/api/applications", { instance, cookie: session.cookie })).status, access === "api" ? 404 : 200);
+    } finally { await instance.dispose(); }
+  }
+});
+
+test("server status filtering and pagination include old pending applications beyond the first fifty", async () => {
+  const now = new Date().toISOString();
+  const insert = db.prepare("INSERT INTO nw_applications (id, ip_hash, fingerprint_hash, day, application_text, status, created_at, updated_at) VALUES (?, 'ip', 'device', '2026-11-09', 'legacy', ?, ?, ?)");
+  await db.batch(Array.from({ length: 53 }, (_, index) => insert.bind(randomUUID(), index < 52 ? "reviewing" : "rejected", now, now)));
+  const first = await request("/internal/applications?status=reviewing", undefined, { admin: true });
+  assert.equal(first.body.data.length, 50); assert.equal(first.body.nextOffset, 50);
+  const second = await request("/internal/applications?status=reviewing&offset=50", undefined, { admin: true });
+  assert.equal(second.body.data.length, 2);
+  assert.equal((await request("/internal/applications?status=rejected", undefined, { admin: true })).body.data.length, 1);
+  assert.equal((await request("/internal/applications?status=invalid", undefined, { admin: true })).status, 400);
+});
+
+test("an unavailable upstream invite does not hide the administrator application detail", async () => {
+  const input = submission(); await apply(input);
+  await db.prepare("UPDATE nw_applications SET encrypted_invite = 'unreadable-legacy-data' WHERE id = ?").bind(input.applicationId).run();
+  const result = await request(`/internal/applications/${input.applicationId}`, undefined, { admin: true });
+  assert.equal(result.status, 200); assert.equal(result.body.application.email, input.email);
+  assert.equal(result.body.upstream, null); assert.ok(result.body.upstreamWarning);
+  assert.ok(!JSON.stringify(result.body).includes("unreadable-legacy-data"));
+});
+
+test("browser page safely renders untrusted text and requires confirmation for every mutation", async () => {
+  const html = (await browser("/admin")).body;
+  const script = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
+  const nodes = new Map(), requests = [];
+  const node = (id) => {
+    if (!nodes.has(id)) nodes.set(id, { value: id === "status-filter" ? "reviewing" : "", hidden: false, disabled: false, children: [], handlers: {}, textContent: "",
+      append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; },
+      addEventListener(event, handler) { this.handlers[event] = handler; },
+      set innerHTML(_value) { throw new Error("Untrusted content must never use innerHTML"); },
+    });
+    return nodes.get(id);
+  };
+  const item = { id: randomUUID(), email: "review@example.com", status: "reviewing", created_at: new Date(Date.now() - 180000).toISOString(), updated_at: new Date().toISOString(), application_text: '<img src=x onerror="alert(1)">', reason: "private note" };
+  let authenticated = false, confirm = false;
+  const context = { document: { getElementById: node, createElement: () => node(randomUUID()) }, window: { confirm: () => confirm },
+    fetch: async (url, options) => {
+      requests.push({ url, method: options.method || "GET", body: options.body && JSON.parse(options.body), options });
+      if (url.endsWith("/session")) {
+        if (options.method === "POST") authenticated = true;
+        if (options.method === "DELETE") authenticated = false;
+        return { ok: authenticated || options.method === "DELETE", status: authenticated ? 200 : 401, json: async () => authenticated ? { authenticated: true } : { message: "请登录" } };
+      }
+      if (url.includes("?")) return { ok: true, status: 200, json: async () => ({ data: [item] }) };
+      if ((options.method || "GET") === "POST") { item.status = "succeeded"; return { ok: true, status: 200, json: async () => ({ status: "succeeded" }) }; }
+      return { ok: true, status: 200, json: async () => ({ application: item, upstream: null }) };
+    },
+  };
+  runInNewContext(script, context);
+  await new Promise(resolve => setImmediate(resolve));
+  node("token").value = bindings.ADMIN_TOKEN;
+  await node("login-form").handlers.submit({ preventDefault() {} });
+  assert.equal(node("token").value, ""); assert.equal(node("app").hidden, false);
+  const detailButton = node("rows").children[0].children[2].children[0];
+  await detailButton.handlers.click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(node("detail-text").textContent, item.application_text);
+  const mutations = () => requests.filter(request => request.url.endsWith("/sent"));
+  await node("mark-sent").handlers.click(); assert.equal(mutations().length, 0);
+  confirm = true; node("note").value = "approved";
+  await node("mark-sent").handlers.click(); assert.equal(mutations().length, 1);
+  assert.deepEqual(mutations()[0].body, { confirm: "INVITATION_EMAIL_SENT", reason: "approved" });
+  assert.equal(node("mark-sent").disabled, true);
+  assert.equal(mutations()[0].options.credentials, "same-origin");
+  assert.ok(!mutations()[0].options.headers.authorization);
+  await node("logout").handlers.click(); assert.equal(node("app").hidden, true);
+  assert.equal(node("rows").children.length, 0); assert.equal(node("detail-text").textContent, "");
 });
