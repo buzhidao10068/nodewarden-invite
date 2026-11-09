@@ -1,11 +1,19 @@
-# 使用 `wrangler secret put NAME` 配置生产环境；本文件仅供本地开发复制为 .dev.vars。
-NODELOC_COOKIE="_t=...; _forum_session=..."
-NODELOC_CSRF_TOKEN="..."
+# Copy to .dev.vars for local development; never commit real values.
+NODEWARDEN_URL="https://vault.example.com"
+NODEWARDEN_CLIENT_ID="user.REPLACE_WITH_ADMIN_USER_ID"
+NODEWARDEN_CLIENT_SECRET="REPLACE_WITH_NODEWARDEN_API_KEY"
+NODEWARDEN_MASTER_PASSWORD_HASH="REPLACE_WITH_NODEWARDEN_MASTER_PASSWORD_HASH"
+# Base64 of exactly 32 random bytes.
+DATA_ENCRYPTION_KEY="REPLACE_WITH_32_BYTE_BASE64_KEY"
+HASH_SALT="REPLACE_WITH_32_BYTE_OR_LONGER_RANDOM_SECRET"
 AI_API_URL="https://api.openai.com/v1/chat/completions"
-AI_API_KEY="..."
-AI_MODEL="gpt-4.1-mini"
-# 必须是随机长字符串；用于匿名化 IP / 指纹，部署后不得随意更换。
-HASH_SALT="use-a-long-random-secret"
-# 可选但强烈建议：配置后，所有申请必须带 Turnstile Token。
-TURNSTILE_SECRET=""
-# 公开值，填入 wrangler.jsonc 的 vars.TURNSTILE_SITE_KEY（不是 secret）。
+AI_API_KEY="REPLACE_WITH_AI_KEY"
+AI_MODEL="REPLACE_WITH_MODEL"
+TURNSTILE_SECRET="REPLACE_WITH_TURNSTILE_SECRET"
+TURNSTILE_SITE_KEY="REPLACE_WITH_TURNSTILE_SITE_KEY"
+ADMIN_TOKEN="REPLACE_WITH_32_BYTE_OR_LONGER_ADMIN_TOKEN"
+DAILY_INVITE_LIMIT="3"
+INVITE_EXPIRES_IN_HOURS="1"
+# To bypass Turnstile on localhost, set both TURNSTILE_* values above to "".
+# All other upstream calls remain real; use a test NodeWarden instance.
+ALLOW_INSECURE_LOCAL_DEV="true"

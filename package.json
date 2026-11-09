@@ -1,14 +1,17 @@
 {
-  "name": "nodeloc-invite-auto",
+  "name": "nodewarden-invite",
   "private": true,
   "version": "1.0.0",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260729.1",
+    "esbuild": "^0.28.1",
+    "miniflare": "^4.20260730.0",
     "typescript": "^5.8.3",
     "wrangler": "^4.116.0"
   }

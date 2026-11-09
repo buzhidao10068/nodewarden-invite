@@ -1,107 +1,72 @@
--- 每天的申请锁：不论 AI 拒绝、上游失败或成功，均占用当天名额。
-CREATE TABLE IF NOT EXISTS daily_locks (
-  subject_kind TEXT NOT NULL CHECK(subject_kind IN ('ip', 'fingerprint')),
-  subject_hash TEXT NOT NULL,
-  day TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (subject_kind, subject_hash, day)
-);
-
--- 成功后永久锁定。哈希值不可反推出 IP 或设备指纹。
-CREATE TABLE IF NOT EXISTS permanent_success_locks (
-  subject_kind TEXT NOT NULL CHECK(subject_kind IN ('ip', 'fingerprint')),
-  subject_hash TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (subject_kind, subject_hash)
-);
-
-CREATE TABLE IF NOT EXISTS applications (
+-- NodeWarden invitation distributor. New names leave legacy NodeLoc tables untouched.
+-- Run against a NEW D1 database. This file can be applied more than once.
+CREATE TABLE IF NOT EXISTS nw_applications (
   id TEXT PRIMARY KEY,
+  receipt_hash TEXT NOT NULL,
   ip_hash TEXT NOT NULL,
   fingerprint_hash TEXT NOT NULL,
+  day TEXT NOT NULL,
   application_text TEXT NOT NULL,
-  ai_approved INTEGER,
-  ai_reason TEXT,
-  status TEXT NOT NULL CHECK(status IN ('pending', 'rejected', 'upstream_failed', 'succeeded')),
-  invite_key TEXT,
+  status TEXT NOT NULL CHECK(status IN ('reviewing','rejected','failed','creating','uncertain','succeeded')),
+  ai_approved INTEGER CHECK(ai_approved IN (0,1)),
+  reason TEXT,
+  error_code TEXT,
+  encrypted_invite TEXT,
+  invite_code_hash TEXT UNIQUE,
+  expires_at TEXT,
+  issue_started_at TEXT,
+  resolve_after TEXT,
   created_at TEXT NOT NULL,
-  completed_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS applications_created_at ON applications(created_at);
-CREATE INDEX IF NOT EXISTS applications_ai_approved ON applications(ai_approved);
-
--- 每日北京时间 08:00 创建的一张邀请码；所有当天获批者共享其链接。
-CREATE TABLE IF NOT EXISTS daily_invites (
-  day TEXT PRIMARY KEY,
-  invite_key TEXT NOT NULL,
-  invite_link TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS invite_claims (
-  day TEXT NOT NULL REFERENCES daily_invites(day),
-  application_id TEXT NOT NULL UNIQUE REFERENCES applications(id),
-  claimed_at TEXT NOT NULL,
-  PRIMARY KEY (day, application_id)
-);
-
--- 数据库层硬限制每天最多三次发放，避免并发申请突破额度。
-CREATE TRIGGER IF NOT EXISTS limit_daily_invite_claims
-BEFORE INSERT ON invite_claims
-WHEN (SELECT COUNT(*) FROM invite_claims WHERE day = NEW.day) >= 3
-BEGIN
-  SELECT RAISE(ABORT, 'daily invite quota exhausted');
-END;
-
--- 新模式：每天创建 3 个单次邀请码，按 fetched_at 先进先出发放。
-CREATE TABLE IF NOT EXISTS pool_generation_slots (
-  source_day TEXT NOT NULL,
-  slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 3),
-  state TEXT NOT NULL CHECK(state IN ('pending', 'creating', 'ready')),
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (source_day, slot)
-);
-
-CREATE TABLE IF NOT EXISTS invite_pool (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source_day TEXT NOT NULL,
-  slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 3),
-  invite_key TEXT NOT NULL UNIQUE,
-  invite_link TEXT NOT NULL,
-  fetched_at TEXT NOT NULL,
-  application_id TEXT UNIQUE REFERENCES applications(id),
-  claimed_at TEXT,
-  UNIQUE(source_day, slot)
-);
-
-CREATE INDEX IF NOT EXISTS invite_pool_fifo ON invite_pool(application_id, fetched_at, id);
-
--- 最新的 NodeLoc 会话；敏感内容由 Worker 在写入前加密。
-CREATE TABLE IF NOT EXISTS nodeloc_session (
-  id TEXT PRIMARY KEY CHECK(id = 'active'),
-  encrypted_cookie TEXT NOT NULL,
-  encrypted_csrf_token TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS nw_applications_status ON nw_applications(status, created_at);
+CREATE INDEX IF NOT EXISTS nw_applications_approved ON nw_applications(ai_approved, id);
 
-CREATE TABLE IF NOT EXISTS managed_invites (
-  invite_key TEXT PRIMARY KEY,
-  remote_invite_id INTEGER NOT NULL UNIQUE,
+CREATE TABLE IF NOT EXISTS nw_daily_attempts (
+  kind TEXT NOT NULL CHECK(kind IN ('ip','fingerprint')),
+  subject_hash TEXT NOT NULL,
+  day TEXT NOT NULL,
+  application_id TEXT NOT NULL REFERENCES nw_applications(id),
+  PRIMARY KEY(kind, subject_hash, day)
+);
+-- Held during review/creation, including across midnight; retained forever after success.
+CREATE TABLE IF NOT EXISTS nw_eligibility (
+  kind TEXT NOT NULL CHECK(kind IN ('ip','fingerprint')),
+  subject_hash TEXT NOT NULL,
+  application_id TEXT NOT NULL REFERENCES nw_applications(id),
+  PRIMARY KEY(kind, subject_hash)
+);
+CREATE INDEX IF NOT EXISTS nw_eligibility_application ON nw_eligibility(application_id);
+
+CREATE TABLE IF NOT EXISTS nw_daily_quota (
+  day TEXT PRIMARY KEY,
+  quota_limit INTEGER NOT NULL CHECK(quota_limit >= 1)
+);
+CREATE TABLE IF NOT EXISTS nw_quota_reservations (
+  application_id TEXT PRIMARY KEY REFERENCES nw_applications(id),
+  day TEXT NOT NULL REFERENCES nw_daily_quota(day)
+);
+CREATE INDEX IF NOT EXISTS nw_reservations_day ON nw_quota_reservations(day);
+CREATE TRIGGER IF NOT EXISTS nw_enforce_quota
+BEFORE INSERT ON nw_quota_reservations
+WHEN (SELECT COUNT(*) FROM nw_quota_reservations WHERE day = NEW.day) >=
+     (SELECT quota_limit FROM nw_daily_quota WHERE day = NEW.day)
+BEGIN
+  SELECT RAISE(ABORT, 'nw_daily_quota_exhausted');
+END;
+
+-- Fixed minute windows bound verification/AI costs; records expire logically, without Cron.
+CREATE TABLE IF NOT EXISTS nw_rate_limits (
+  bucket TEXT NOT NULL,
+  subject_hash TEXT NOT NULL,
+  window INTEGER NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY(bucket, subject_hash, window)
+);
+CREATE TABLE IF NOT EXISTS nw_admin_audit (
+  id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL REFERENCES nw_applications(id),
+  action TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS invite_deletions (
-  invite_key TEXT PRIMARY KEY REFERENCES managed_invites(invite_key),
-  remote_invite_id INTEGER NOT NULL,
-  application_id TEXT NOT NULL UNIQUE REFERENCES applications(id),
-  delete_after TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'deleted')),
-  attempts INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  updated_at TEXT NOT NULL,
-  deleted_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS invite_deletions_due ON invite_deletions(state, delete_after);
+CREATE INDEX IF NOT EXISTS nw_rate_limits_window ON nw_rate_limits(window);
