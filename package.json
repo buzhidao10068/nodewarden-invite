@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "admin:totp-setup": "node scripts/admin-totp-setup.mjs",
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },

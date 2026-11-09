@@ -17,7 +17,7 @@ const schema = await readFile(new URL("../schema.sql", import.meta.url), "utf8")
 const legacySchema = await readFile(new URL("./legacy-schema.sql", import.meta.url), "utf8");
 const sql = (text) => text.replace(/^--.*$/gm, "").replace(/\n/g, " ");
 const bundle = (options) => build({ bundle: true, write: false, format: "esm", target: "es2022", logLevel: "silent", ...options });
-const utilities = await bundle({ stdin: { contents: 'export * from "./src/store.ts"; export * from "./src/security.ts"; export * from "./src/dedup.ts"; export { normalizeEmail } from "./src/applications.ts";', resolveDir: process.cwd() }, platform: "node" });
+const utilities = await bundle({ stdin: { contents: 'export * from "./src/store.ts"; export * from "./src/security.ts"; export * from "./src/dedup.ts"; export * from "./src/totp.ts"; export { normalizeEmail } from "./src/applications.ts";', resolveDir: process.cwd() }, platform: "node" });
 const helpers = await import(`data:text/javascript;base64,${Buffer.from(utilities.outputFiles[0].text).toString("base64")}`);
 let mf, db, workerScript, mode, calls, invites;
 const asJson = (body, status = 200) => new WorkerResponse(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -45,6 +45,23 @@ async function browser(path, { instance = mf, cookie, body, method = body === un
     cookie: response.headers.get("set-cookie")?.split(";")[0] };
 }
 const login = (options = {}) => browser("/admin/api/session", { body: { token: bindings.ADMIN_TOKEN }, ...options });
+const base32Secret = () => Array.from(randomBytes(32), byte => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[byte & 31]).join("");
+// Independent Node HMAC implementation, also used to exercise the real Workers runtime.
+function totpCode(secret, step = Math.floor(Date.now() / 30000)) {
+  const bits = [...secret].map(character => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(character).toString(2).padStart(5, "0")).join("");
+  const key = Buffer.from(bits.match(/.{8}/g).map(byte => parseInt(byte, 2)));
+  const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(step));
+  const signature = createHmac("sha1", key).update(counter).digest();
+  return ((signature.readUInt32BE(signature.at(-1) & 15) & 0x7fffffff) % 1000000).toString().padStart(6, "0");
+}
+async function adminInstance(extraBindings, run) {
+  const instance = new Miniflare({ modules: true, script: workerScript, compatibilityDate: "2026-07-30", d1Databases: ["DB"], bindings: { ...bindings, ...extraBindings }, log: new NoOpLog() });
+  try {
+    const database = await instance.getD1Database("DB");
+    await database.exec(sql(schema));
+    await run(instance, database);
+  } finally { await instance.dispose(); }
+}
 const apply = (input, options) => request("/api/applications", input, options);
 const status = (email, options) => request("/api/applications/status", { email }, options);
 const count = async (table) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n;
@@ -390,7 +407,7 @@ test("admin cookies reject forgery, expiry, cross-origin writes and cross-channe
   const last = cookie.at(-1) === "0" ? "1" : "0";
   assert.equal((await browser("/admin/api/session", { cookie: cookie.slice(0, -1) + last })).status, 401);
   const payload = `${Math.floor(Date.now() / 1000) - 1}.${randomUUID()}`;
-  const signature = createHmac("sha256", bindings.ADMIN_TOKEN).update(`nw-admin-session-v1:${payload}`).digest("hex");
+  const signature = createHmac("sha256", JSON.stringify([bindings.ADMIN_TOKEN, null])).update(`nw-admin-session-v1:${payload}`).digest("hex");
   const cookieKey = cookie.slice(0, cookie.indexOf("="));
   assert.equal((await browser("/admin/api/session", { cookie: `${cookieKey}=${payload}.${signature}` })).status, 401);
   assert.equal((await login({ body: { token: "wrong" } })).status, 401);
@@ -439,8 +456,102 @@ test("an unavailable upstream invite does not hide the administrator application
   assert.ok(!JSON.stringify(result.body).includes("unreadable-legacy-data"));
 });
 
-test("browser page safely renders untrusted text and requires confirmation for every mutation", async () => {
-  const html = (await browser("/admin")).body;
+test("TOTP follows RFC 6238 vectors including leading zeroes, clock tolerance and strict code validation", async () => {
+  // RFC 6238's public SHA1 test key is the ASCII sequence 1..9,0 repeated twice.
+  const key = Array.from({ length: 20 }, (_, index) => 48 + ((index + 1) % 10));
+  const keyBits = key.map(byte => byte.toString(2).padStart(8, "0")).join("");
+  const secret = keyBits.match(/.{5}/g).map(group => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[parseInt(group, 2)]).join("");
+  for (const [seconds, code] of [[59, "287082"], [1111111109, "081804"], [1111111111, "050471"], [1234567890, "005924"], [2000000000, "279037"], [20000000000, "353130"]]) {
+    assert.equal(await helpers.matchingTotpStep(code, secret, seconds * 1000), Math.floor(seconds / 30));
+    assert.equal(totpCode(secret, Math.floor(seconds / 30)), code);
+  }
+  const now = 1234567890000, current = Math.floor(now / 30000);
+  for (const delta of [-1, 0, 1]) assert.equal(await helpers.matchingTotpStep(totpCode(secret, current + delta), secret, now), current + delta);
+  for (const delta of [-2, 2]) assert.equal(await helpers.matchingTotpStep(totpCode(secret, current + delta), secret, now), null);
+  for (const code of [undefined, null, 5924, "5924", "005924 ", "００５９２４", {}, "0000000"]) assert.equal(await helpers.matchingTotpStep(code, secret, now), null);
+  assert.equal(helpers.totpSecret({}), null);
+  assert.equal(helpers.totpSecret({ ADMIN_TOTP_SECRET: secret.toLowerCase().match(/.{4}/g).join(" ") }), secret);
+  for (const invalid of ["", " ", "too-short", "A".repeat(33), "A".repeat(33) + "Z", "A".repeat(129)]) assert.throws(() => helpers.totpSecret({ ADMIN_TOTP_SECRET: invalid }));
+});
+
+test("configured web 2FA requires both credentials, consumes codes and keeps Bearer administration available", async () => {
+  const secret = base32Secret();
+  await adminInstance({ ADMIN_TOTP_SECRET: secret }, async (instance, database) => {
+    const rejected = [];
+    rejected.push(await login({ instance }));
+    rejected.push(await login({ instance, body: { token: bindings.ADMIN_TOKEN, totp: "invalid" } }));
+    rejected.push(await login({ instance, body: { token: "wrong", totp: totpCode(secret) } }));
+    for (const result of rejected) { assert.equal(result.status, 401); assert.equal(result.cookie, undefined); }
+    assert.equal(new Set(rejected.map(result => result.body.message)).size, 1);
+    const totp = totpCode(secret);
+    const authenticated = await login({ instance, body: { token: bindings.ADMIN_TOKEN, totp } });
+    assert.equal(authenticated.status, 200); assert.ok(authenticated.cookie);
+    assert.equal((await browser("/admin/api/session", { instance, cookie: authenticated.cookie })).status, 200);
+    assert.equal((await browser("/admin/api/applications", { instance, cookie: authenticated.cookie })).status, 200);
+    const replay = await login({ instance, body: { token: bindings.ADMIN_TOKEN, totp } });
+    assert.equal(replay.status, 401); assert.equal(replay.cookie, undefined);
+    assert.equal((await database.prepare("SELECT COUNT(*) AS n FROM nw_rate_limits WHERE bucket = 'admin-totp-used'").first()).n, 1);
+    const stored = JSON.stringify((await database.prepare("SELECT * FROM nw_rate_limits").all()).results);
+    assert.ok(!stored.includes(secret));
+    assert.equal((await browser("/internal/applications", { instance, token: bindings.ADMIN_TOKEN })).status, 200);
+    const limited = await login({ instance, body: { token: bindings.ADMIN_TOKEN, totp } });
+    assert.equal(limited.status, 429);
+  });
+});
+
+test("concurrent logins can consume a TOTP step only once", async () => {
+  const secret = base32Secret();
+  await adminInstance({ ADMIN_TOTP_SECRET: secret }, async instance => {
+    const body = { token: bindings.ADMIN_TOKEN, totp: totpCode(secret) };
+    const results = await Promise.all([login({ instance, body, ip: "203.0.113.11" }), login({ instance, body, ip: "203.0.113.12" })]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 401]);
+    assert.equal(results.filter(result => result.cookie).length, 1);
+  });
+});
+
+test("enabling, rotating or removing 2FA invalidates sessions and legacy pre-2FA signatures cannot bypass it", async () => {
+  const original = (await login()).cookie;
+  const firstSecret = base32Secret();
+  let protectedCookie;
+  await adminInstance({ ADMIN_TOTP_SECRET: firstSecret }, async instance => {
+    assert.equal((await browser("/admin/api/session", { instance, cookie: original })).status, 401);
+    const payload = `${Math.floor(Date.now() / 1000) + 3600}.${randomUUID()}`;
+    const signature = createHmac("sha256", bindings.ADMIN_TOKEN).update(`nw-admin-session-v1:${payload}`).digest("hex");
+    const cookieKey = original.slice(0, original.indexOf("="));
+    assert.equal((await browser("/admin/api/session", { instance, cookie: `${cookieKey}=${payload}.${signature}` })).status, 401);
+    const authenticated = await login({ instance, body: { token: bindings.ADMIN_TOKEN, totp: totpCode(firstSecret) } });
+    assert.equal(authenticated.status, 200); protectedCookie = authenticated.cookie;
+  });
+  await adminInstance({ ADMIN_TOTP_SECRET: base32Secret() }, async instance => {
+    assert.equal((await browser("/admin/api/applications", { instance, cookie: protectedCookie })).status, 401);
+  });
+  assert.equal((await browser("/admin/api/session", { cookie: protectedCookie })).status, 401);
+});
+
+test("malformed configured 2FA secrets fail closed without affecting public pages or Bearer API", async () => {
+  for (const secret of ["", "not-a-valid-base32-secret"]) await adminInstance({ ADMIN_TOTP_SECRET: secret }, async instance => {
+    const result = await login({ instance });
+    assert.equal(result.status, 503); assert.equal(result.cookie, undefined);
+    assert.equal((await browser("/internal/applications", { instance, token: bindings.ADMIN_TOKEN })).status, 200);
+    assert.equal((await browser("/", { instance })).status, 200);
+  });
+});
+
+test("admin page displays the 2FA prompt only when configured and never embeds the setup key", async () => {
+  assert.match((await browser("/admin")).body, /id="totp-field" class="field" hidden/);
+  const secret = base32Secret();
+  await adminInstance({ ADMIN_TOTP_SECRET: secret }, async instance => {
+    const html = (await browser("/admin", { instance })).body;
+    assert.ok(!html.includes(secret)); assert.ok(!html.includes(bindings.ADMIN_TOKEN));
+    assert.match(html, /autocomplete="one-time-code"/);
+    assert.match(html, /const totpRequired = true/);
+    assert.ok(!html.includes('id="totp-field" class="field" hidden'));
+    new Script(html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1]);
+  });
+});
+
+test("browser page safely renders untrusted text, submits 2FA without storing it and confirms every mutation", async () => {
+  const html = (await browser("/admin")).body.replace("const totpRequired = false", "const totpRequired = true");
   const script = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
   const nodes = new Map(), requests = [];
   const node = (id) => {
@@ -469,7 +580,14 @@ test("browser page safely renders untrusted text and requires confirmation for e
   runInNewContext(script, context);
   await new Promise(resolve => setImmediate(resolve));
   node("token").value = bindings.ADMIN_TOKEN;
+  node("totp").value = "123";
   await node("login-form").handlers.submit({ preventDefault() {} });
+  assert.equal(requests.filter(request => request.method === "POST").length, 0);
+  node("totp").value = "005924";
+  await node("login-form").handlers.submit({ preventDefault() {} });
+  const credentials = requests.find(request => request.method === "POST");
+  assert.deepEqual(credentials.body, { token: bindings.ADMIN_TOKEN, totp: "005924" });
+  assert.equal(node("totp").value, "");
   assert.equal(node("token").value, ""); assert.equal(node("app").hidden, false);
   const detailButton = node("rows").children[0].children[2].children[0];
   await detailButton.handlers.click(); await new Promise(resolve => setImmediate(resolve));

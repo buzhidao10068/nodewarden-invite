@@ -6,6 +6,8 @@
 
 管理员可打开 **`https://你的申请服务域名/admin`** 审核申请，也可继续使用 PowerShell 管理 API。通过 `ADMIN_ACCESS_MODE` 选择仅网页、仅 API 或同时启用，默认两种方式都启用。
 
+管理员网页支持验证器 TOTP 两步验证：配置 `ADMIN_TOTP_SECRET` 后，必须同时输入管理令牌和 6 位动态验证码。可使用 Google Authenticator、Microsoft Authenticator、Aegis、2FAS 等支持标准 TOTP 的验证器。
+
 ## 使用 Cloudflare 控制台从 GitHub 部署
 
 以下流程可以完全在浏览器中操作。界面中英文名称可能略有差异，按对应设置项操作即可。
@@ -88,6 +90,7 @@ console.log({ HASH_SALT: inviteRandom32(), ADMIN_TOKEN: inviteRandom32() });
 | `TURNSTILE_SECRET` | Secret | 第 4 步的 Secret Key |
 | `HASH_SALT` | Secret | 第 5 步生成的随机盐 |
 | `ADMIN_TOKEN` | Secret | 第 5 步生成的管理令牌 |
+| `ADMIN_TOTP_SECRET` | Secret，可选 | 网页 2FA 的独立 Base32 密钥；配置后强制动态码，生成和绑定步骤见下方 |
 | `ADMIN_ACCESS_MODE` | Text，可选 | `web` 仅网页、`api` 仅 PowerShell/API、`both` 两者同时启用；不填默认 `both` |
 
 人工邮件发放流程必填 **1 个 Text、3 个 Secret**，以及 D1 `DB` 绑定；管理方式变量可按需添加。生产环境不设置 `ALLOW_INSECURE_LOCAL_DEV`。不要只填 **Settings → Builds** 的构建变量，它们不能替代运行时变量。
@@ -101,7 +104,7 @@ console.log({ HASH_SALT: inviteRandom32(), ADMIN_TOKEN: inviteRandom32() });
 1. 打开申请页，确认邮箱、申请说明、Turnstile 和“查询申请状态”可见。
 2. 填写可收信邮箱和至少 1 个字，提交后应显示等待管理员人工审核。
 3. 用同一邮箱查询，应显示待审核。查询只返回通用状态，不返回申请文字、管理员备注、邀请码或注册链接。
-4. 默认模式下打开 `https://你的申请服务域名/admin`，输入 `ADMIN_TOKEN` 登录，确认能看到待审核申请的邮箱和说明；也可使用下方 PowerShell 示例。
+4. 默认模式下打开 `https://你的申请服务域名/admin`，输入 `ADMIN_TOKEN`，如已启用 2FA 再输入验证器动态码，登录后确认能看到待审核申请的邮箱和说明；也可使用下方 PowerShell 示例。
 5. 在 NodeWarden 管理页创建邀请码，通过邮箱手动发送后，在审核网页或 PowerShell 中标记已发送。
 6. 再次查询应提示留意管理员邮件。
 7. Worker 的 **Settings → Triggers / Cron Triggers** 应为空。`crons: []` 用于显式移除旧定时任务。
@@ -127,7 +130,7 @@ console.log({ HASH_SALT: inviteRandom32(), ADMIN_TOKEN: inviteRandom32() });
 ### 使用管理员网页
 
 1. 打开 **`https://你的申请服务域名/admin`**，例如 `https://nodewarden-invite.你的子域.workers.dev/admin`。该页面随 Worker 部署，无需额外部署网站。
-2. 输入本申请服务的 **`ADMIN_TOKEN`** 登录。它是在上方第 5 步生成、保存在 Worker Secret 中的管理令牌，无需提供 NodeWarden 管理员 ID 或主密码。
+2. 输入本申请服务的 **`ADMIN_TOKEN`** 登录。它是在上方第 5 步生成、保存在 Worker Secret 中的管理令牌，无需提供 NodeWarden 管理员 ID 或主密码。启用下方 2FA 后，还需输入验证器当前显示的 **6 位动态验证码**。
 3. 默认显示待审核申请。可按状态筛选、翻页、刷新列表，点击“查看”读取邮箱、申请说明和管理员备注。
 4. 审核通过后，在 **NodeWarden 自己的管理页** 创建邀请码，用自己的邮箱发给申请人。发信后回到本项目，选择该申请，点击 **“标记邮件已发送”** 并确认。
 5. 不通过的申请点击 **“拒绝申请”**，可填写仅管理员可见的备注。需要撤回且允许重新申请时，确认未发信、无可用或已使用邀请码，在创建满 2 分钟后点击 **“释放申请资格”**。
@@ -135,7 +138,27 @@ console.log({ HASH_SALT: inviteRandom32(), ADMIN_TOKEN: inviteRandom32() });
 
 网页可选填写关联邀请码；使用前需配置下方 NodeWarden API 凭据。邀请码关联、状态检查不会自动发信。旧记录恢复、撤码和封禁也可使用下方 PowerShell 示例，需启用 `api` 或 `both`；仅用网页时可在 NodeWarden 自己的管理页处理这些上游操作。
 
-生产环境登录要求 HTTPS。登录后签发有效期 8 小时的签名会话，Cookie 带 `HttpOnly`、`Secure`、`SameSite=Strict`；令牌不会写入页面源码或浏览器本地存储，刷新可继续使用会话。会话到期重新登录，更换 `ADMIN_TOKEN` 会使旧会话失效。登录每 IP 每分钟最多 5 次、全站每分钟最多 30 次；遇到 429 稍后重试。管理网页不会在公开申请页提供入口。
+生产环境登录要求 HTTPS。登录后签发有效期 8 小时的签名会话，Cookie 带 `HttpOnly`、`Secure`、`SameSite=Strict`；令牌、动态码和 2FA 密钥不会写入页面源码或浏览器本地存储，刷新可继续使用会话。会话到期重新登录，更换 `ADMIN_TOKEN` 或启用、更换、删除 `ADMIN_TOTP_SECRET` 都会使旧会话失效。本次会话格式升级也会要求已有网页会话重新登录。登录每 IP 每分钟最多 5 次、全站每分钟最多 30 次；遇到 429 稍后重试。管理网页不会在公开申请页提供入口。
+
+### 开启管理员网页 2FA
+
+1. 在自己电脑的仓库目录运行以下命令；只需安装 Node.js，无需 Cloudflare CLI 登录：
+
+   ```powershell
+   npm run admin:totp-setup
+   ```
+
+   脚本在本机生成独立的 **32 位 Base32 随机密钥**和 `otpauth://` URI，输出只保留在当前终端。请私密备份密钥，不要把它提交到 Git 或上传到在线二维码网站。
+2. 打开验证器，选择“添加账户 / 手动输入设置密钥”。账户名称填写 `NodeWarden Invite:admin`，密钥填写上一步的密钥，类型选择**基于时间 TOTP**。如可设置参数，选择 **SHA1、6 位、30 秒**。支持导入 URI 的验证器也可直接使用输出的 `otpauth://` URI。
+3. 打开 **Cloudflare → Workers & Pages → 该 Worker → Settings → Variables & Secrets → Add**，类型选 **Secret**，名称填 **`ADMIN_TOTP_SECRET`**，值填同一密钥，保存并部署。这里填写的是长期密钥，不能填当前 6 位验证码，也不能填完整 URI。不要添加到构建变量或仓库 `vars`。
+4. 重新打开 `/admin`，页面会显示动态验证码输入框。输入原 `ADMIN_TOKEN` 和验证器当前的 6 位码登录。原有会话自动失效，修改前已打开的登录页需要刷新。
+5. 退出后用同一码再次登录会被拒绝；等待验证器切换到下一个码再登录。服务接受当前及相邻 30 秒时间窗口，以容忍少量时钟偏差。手机应开启自动日期与时间。
+
+不设置 `ADMIN_TOTP_SECRET` 时保留原令牌登录；配置为空或格式错误时拒绝网页登录，不会降级关闭 2FA。启用后，动态码的重复使用通过 D1 原子写入拦截，复用现有限流表，无需迁移数据库或增加 Cron。
+
+**2FA 保护网页登录。PowerShell `/internal/...` 仍使用 Bearer 令牌。** 如果希望所有本项目的管理访问都经过 2FA，将 `ADMIN_ACCESS_MODE` 设为 `web`；保留 `both` 时，应把 `ADMIN_TOKEN` 按完整管理凭据保管。
+
+丢失验证器时，先用私密备份的密钥恢复；如果没有备份，通过受保护的 Cloudflare 账户将 `ADMIN_TOTP_SECRET` 换成新密钥并重新绑定验证器。也可删除该 Secret 并部署，暂时恢复令牌登录，再重新开启。未提供网页绕过入口或备用恢复码，恢复依赖 Cloudflare 控制台权限。
 
 ### 使用 PowerShell 管理 API
 
@@ -274,7 +297,7 @@ Invoke-RestMethod -Method Post -Uri "$inviteServiceUrl/internal/applications/$ap
 | `POST /api/applications/status` | 提交 `{ "email": "申请邮箱" }` 查询最新状态 |
 | `GET /admin` | 管理员登录和审核网页，`web` / `both` 模式开放 |
 | `GET /admin/api/session` | 检查网页登录会话 |
-| `POST /admin/api/session` | 提交 `{ "token": "ADMIN_TOKEN 的值" }` 登录，签发会话 Cookie |
+| `POST /admin/api/session` | 提交 `{ "token": "ADMIN_TOKEN 的值", "totp": "6 位动态码" }` 登录，签发会话 Cookie；未配置 2FA 时省略 `totp` |
 | `DELETE /admin/api/session` | 退出网页登录，清除 Cookie |
 | `/admin/api/applications...` | 网页会话认证，复用下方申请管理操作；`web` / `both` 模式开放 |
 | `GET /internal/applications` | 管理员列表，包含邮箱，每页 50 条；可用 `status`、`offset` 筛选和分页 |
@@ -308,7 +331,7 @@ npm run typecheck
 npx wrangler deploy --dry-run
 ```
 
-测试使用 Miniflare 真实 Workers 运行时和 D1，覆盖邮箱校验、手动发放状态、查询信息范围、超过三条申请、并发风控及事务回滚、旧库升级、Unicode 长度、查重、Turnstile、限流、历史恢复和管理员撤码 / 封禁；同时验证网页登录、会话签名与过期、同源保护、三种入口模式、网页/API 状态共享、分页筛选和页面安全渲染。外部请求使用模拟响应，试打包不会部署；真实 Cloudflare 运行配置、NodeWarden 操作和邮件收信仍需部署后验证。
+测试使用 Miniflare 真实 Workers 运行时和 D1，覆盖邮箱校验、手动发放状态、查询信息范围、超过三条申请、并发风控及事务回滚、旧库升级、Unicode 长度、查重、Turnstile、限流、历史恢复和管理员撤码 / 封禁；同时验证网页登录、会话签名与过期、同源保护、三种入口模式、网页/API 状态共享、分页筛选和页面安全渲染。2FA 验证包含 RFC 6238 标准向量、前导零、时间偏差、动态码缺失或错误、并发重复使用、配置错误和凭据轮换后的会话失效。外部请求使用模拟响应，试打包不会部署；真实 Cloudflare 运行配置、NodeWarden 操作和邮件收信仍需部署后验证。
 
 ## 常见问题
 
@@ -322,6 +345,9 @@ npx wrangler deploy --dry-run
 | `/admin` 返回 404 | 核对已部署新版，`ADMIN_ACCESS_MODE` 为 `web` 或 `both` |
 | PowerShell 管理接口返回 404 | 核对 `ADMIN_ACCESS_MODE` 为 `api` 或 `both`，并携带正确 Bearer 令牌 |
 | 管理员登录失败或过期 | 使用申请服务的 `ADMIN_TOKEN`，至少 32 字符；使用 HTTPS、允许 Cookie，过期后重新登录 |
+| 未出现动态码输入框 | 确认已部署新版，在运行时 Secret 中设置 `ADMIN_TOTP_SECRET` 后保存部署并刷新页面 |
+| 动态码错误或已使用 | 手机开启自动时间，确认密钥、SHA1 / 6 位 / 30 秒参数，等待下一码后重试；前导零也需输入 |
+| 配置 2FA 后服务不可用 | Secret 需为至少 32 字符的有效 Base32 密钥，不能是验证码或 URI；空值不会关闭 2FA |
 | 返回 429 | 来源每日申请限制、处理中 / 已领取限制或每分钟限流 |
 | 标记已发送后没收到邮件 | 该接口只记录状态；管理员需自行发送邮件，并核对地址和垃圾邮件 |
 | 可选的上游操作失败 | 核对管理员 UUID、API Key、认证派生值、加密密钥和 NodeWarden 访问策略 |

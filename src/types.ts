@@ -9,6 +9,8 @@ export interface Env {
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   ADMIN_TOKEN?: string;
+  /** Optional Base32 secret: when configured, web login also requires a TOTP code. */
+  ADMIN_TOTP_SECRET?: string;
   /** web: session API, api: Bearer API, both: enables both. Defaults to both. */
   ADMIN_ACCESS_MODE?: string;
   ALLOW_INSECURE_LOCAL_DEV?: string;

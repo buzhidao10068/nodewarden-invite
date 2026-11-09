@@ -1,5 +1,6 @@
 import { digest, isLocal, json, readBody, secureMatches } from "./security.js";
 import { takeRate } from "./store.js";
+import { matchingTotpStep, totpSecret } from "./totp.js";
 import type { Env } from "./types.js";
 
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -22,7 +23,9 @@ function sessionCookie(value: string, request: Request, env: Env, maxAge = SESSI
 }
 
 async function sessionKey(env: Env): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", new TextEncoder().encode(env.ADMIN_TOKEN), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+  // Bind sessions to both credentials. Enabling or rotating 2FA invalidates old cookies.
+  const material = JSON.stringify([env.ADMIN_TOKEN, totpSecret(env)]);
+  return crypto.subtle.importKey("raw", new TextEncoder().encode(material), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
 async function makeSession(env: Env): Promise<string> {
@@ -75,7 +78,19 @@ export async function adminSessionRoute(request: Request, env: Env): Promise<Res
   }
   let body: Record<string, unknown>;
   try { body = await readBody(request); } catch { return json({ message: "请求格式无效。" }, 400); }
-  if (typeof body.token !== "string" || !await secureMatches(body.token, env.ADMIN_TOKEN)) return json({ message: "管理员令牌无效。" }, 401);
+  const secret = totpSecret(env);
+  const invalid = () => json({ message: "管理员令牌或动态验证码无效，或验证码已使用。" }, 401);
+  if (typeof body.token !== "string" || !await secureMatches(body.token, env.ADMIN_TOKEN)) return invalid();
+  if (secret !== null) {
+    const step = await matchingTotpStep(body.totp, secret);
+    if (step === null) return invalid();
+    // D1 atomically consumes the time step, including concurrent logins at different edges.
+    // Store its fixed minute so existing bounded rate-limit cleanup also expires these rows.
+    const used = await env.DB.prepare(`INSERT INTO nw_rate_limits (bucket, subject_hash, window, count)
+      VALUES ('admin-totp-used', ?, ?, 1) ON CONFLICT(bucket, subject_hash, window) DO NOTHING RETURNING count`)
+      .bind(await digest(`admin-totp-step:${step}`, secret), Math.floor(step / 2)).first();
+    if (!used) return invalid();
+  }
   const response = json({ authenticated: true });
   response.headers.set("set-cookie", sessionCookie(await makeSession(env), request, env));
   return response;

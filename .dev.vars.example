@@ -1,6 +1,8 @@
 # Required for the application page. Never commit real values.
 HASH_SALT="REPLACE_WITH_32_BYTE_OR_LONGER_RANDOM_SECRET"
 ADMIN_TOKEN="REPLACE_WITH_32_BYTE_OR_LONGER_ADMIN_TOKEN"
+# 可选网页 2FA：生成独立 Base32 密钥后取消注释并替换；不要使用示例值。
+# ADMIN_TOTP_SECRET="REPLACE_WITH_RANDOM_BASE32_SECRET"
 # 可选：web 仅启用网页、api 仅启用 PowerShell/API、both 同时启用（默认 both）。
 ADMIN_ACCESS_MODE="both"
 TURNSTILE_SECRET="REPLACE_WITH_TURNSTILE_SECRET"

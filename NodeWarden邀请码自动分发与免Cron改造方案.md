@@ -71,11 +71,20 @@ D1 原子写入申请、邮箱及 IP / 设备限制
 
 网页通过 HTTPS 登录取得有效期 8 小时的签名 Cookie，具有 `HttpOnly`、`Secure` 和 `SameSite=Strict` 属性；不将管理令牌保存在网页源码或本地存储。写操作检查同源 `Origin`，登录另有限流。PowerShell 继续使用 `Authorization: Bearer <ADMIN_TOKEN>`。两种方式处理的是相同记录，其他窗口操作后刷新即可看到结果。
 
+### 管理员网页 2FA
+
+- 运行 `npm run admin:totp-setup` 在本地生成独立 Base32 随机密钥，手动添加至验证器，再将同一密钥保存为 Cloudflare Worker 的运行时 Secret `ADMIN_TOTP_SECRET`。
+- 配置后网页必须同时验证 `ADMIN_TOKEN` 和 6 位 TOTP 动态码，使用 RFC 6238 的 SHA1、30 秒周期，允许前后一个周期偏差；配置错误或为空时拒绝登录，不自动降级。
+- D1 原子写入已使用时间步，防止同一动态码的并发重复使用；复用 `nw_rate_limits` 的过期清理，无需新表、迁移或 Cron。未保存验证码明文或 2FA 密钥。
+- 会话签名绑定管理令牌与 2FA 密钥，启用、更换或移除 2FA 后旧会话失效。已登录的 8 小时会话内无须每次操作重复输入验证码。
+- PowerShell Bearer 认证保留；如要求所有管理入口均经 2FA，应选择 `ADMIN_ACCESS_MODE=web`。`both` 仍允许令牌直接访问管理 API。
+- 验证器丢失可用私密备份密钥恢复，或通过 Cloudflare 控制台更换 Secret。具体绑定与恢复步骤见 README。
+
 | 路径 | 用途 |
 | --- | --- |
 | `GET /admin` | 管理员登录与审核页 |
 | `GET /admin/api/session` | 检查会话 |
-| `POST /admin/api/session` | 管理令牌登录 |
+| `POST /admin/api/session` | 管理令牌登录；配置 2FA 后需同时提交 `totp` 动态码 |
 | `DELETE /admin/api/session` | 退出登录 |
 | `GET /admin/api/applications?status=reviewing&offset=0` | 网页列表、状态筛选和分页 |
 | `GET /admin/api/applications/:id` | 网页查看申请说明和邮箱 |

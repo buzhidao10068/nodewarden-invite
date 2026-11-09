@@ -23,7 +23,7 @@ export default {
       if (request.method === "GET" && url.pathname === "/admin") {
         if (adminMode(env) === "api") return new Response("Not found", { status: 404 });
         const nonce = crypto.randomUUID();
-        return new Response(adminPage(nonce), { headers: {
+        return new Response(adminPage(nonce, env.ADMIN_TOTP_SECRET !== undefined), { headers: {
           "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff",
           "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-robots-tag": "noindex, nofollow",
           "content-security-policy": `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
