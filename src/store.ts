@@ -1,6 +1,8 @@
 import { dailyLimit, type Application, type Env } from "./types.js";
 
-export const load = (id: string, env: Env) => env.DB.prepare("SELECT * FROM nw_applications WHERE id = ?").bind(id).first<Application>();
+export const load = (id: string, env: Env) => env.DB.prepare(`SELECT id, receipt_hash, ip_hash, fingerprint_hash, day, application_text, status,
+  reason, error_code, encrypted_invite, invite_code_hash, expires_at, issue_started_at, resolve_after, created_at, updated_at
+  FROM nw_applications WHERE id = ?`).bind(id).first<Application>();
 
 export async function takeRate(bucket: string, subject: string, limit: number, env: Env): Promise<boolean> {
   const window = Math.floor(Date.now() / 60000);
@@ -36,8 +38,8 @@ export async function finishBeforeCreation(id: string, status: "rejected" | "fai
     env.DB.prepare(`DELETE FROM nw_eligibility WHERE application_id IN (${predicate})`).bind(id),
     env.DB.prepare(`DELETE FROM nw_quota_reservations WHERE application_id IN (${predicate})`).bind(id),
     ...(status === "failed" ? [env.DB.prepare(`DELETE FROM nw_daily_attempts WHERE application_id IN (${predicate})`).bind(id)] : []),
-    env.DB.prepare("UPDATE nw_applications SET status = ?, reason = ?, error_code = ?, ai_approved = ?, updated_at = ? WHERE id = ? AND status = 'reviewing'")
-      .bind(status, reason, code, status === "rejected" ? 0 : null, new Date().toISOString(), id),
+    env.DB.prepare("UPDATE nw_applications SET status = ?, reason = ?, error_code = ?, updated_at = ? WHERE id = ? AND status = 'reviewing'")
+      .bind(status, reason, code, new Date().toISOString(), id),
   ]);
 }
 

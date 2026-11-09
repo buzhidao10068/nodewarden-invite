@@ -1,5 +1,5 @@
 import { accessToken, CreationError, createInvite } from "./nodewarden.js";
-import { isDuplicate, review } from "./review.js";
+import { isDuplicate } from "./dedup.js";
 import { beijingDay, decrypt, digest, encrypt, isLocal, json, readBody, secureMatches, verifyTurnstile } from "./security.js";
 import { failDefiniteCreation, finishBeforeCreation, load, markUncertain, reserve, saveInvite, takeRate } from "./store.js";
 import { dailyLimit, expiryHours, type Application, type Env, type Invite } from "./types.js";
@@ -10,12 +10,12 @@ export async function applicationResponse(application: Application, env: Env): P
     const invite = await decrypt<Invite>(application.encrypted_invite, application.id, env);
     const expired = Date.parse(invite.expiresAt) <= Date.now();
     return json({ ...common, inviteLink: invite.inviteLink, expiresAt: invite.expiresAt, expired,
-      message: expired ? "此邀请码已到期。每个来源只能成功领取一次。" : "审核通过，请在有效期内完成注册。邀请码仅可使用一次。" });
+      message: expired ? "此邀请码已到期。每个来源只能成功领取一次。" : "邀请码已生成，请在有效期内完成注册。邀请码仅可使用一次。" });
   }
   if (application.status === "failed") return json({ ...common, retryable: true, message: application.reason ?? "服务暂不可用，可稍后重新申请。" }, 503);
-  if (application.status === "rejected") return json({ ...common, message: `未通过审核：${application.reason ?? "申请不符合要求"}` }, 403);
+  if (application.status === "rejected") return json({ ...common, message: `申请未通过：${application.reason ?? "申请不符合要求"}` }, 403);
   const uncertain = application.status === "uncertain" || application.status === "creating";
-  return json({ ...common, message: uncertain ? "发码结果正在确认，请保留申请回执并稍后查询。请勿重新申请。" : "正在审核，请保留申请回执并稍后查询。" }, 202);
+  return json({ ...common, message: uncertain ? "发码结果正在确认，请保留申请回执并稍后查询。请勿重新申请。" : "正在处理，请保留申请回执并稍后查询。" }, 202);
 }
 
 export async function statusRequest(request: Request, id: string, env: Env): Promise<Response> {
@@ -49,8 +49,8 @@ export async function handleApplication(request: Request, env: Env): Promise<Res
   const text = typeof input.application === "string" ? input.application.trim() : "";
   const fingerprint = typeof input.fingerprint === "string" ? input.fingerprint.toLowerCase() : "";
   if (typeof id !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id) ||
-      typeof receipt !== "string" || !/^[a-f0-9]{64}$/.test(receipt) || !/^[a-f0-9]{64}$/.test(fingerprint) || [...text].length < 100 || [...text].length > 5000) {
-    return json({ message: "申请须为 100–5000 个字符，并包含有效的设备标识和申请回执。" }, 400);
+      typeof receipt !== "string" || !/^[a-f0-9]{64}$/.test(receipt) || !/^[a-f0-9]{64}$/.test(fingerprint) || [...text].length < 1 || [...text].length > 5000) {
+    return json({ message: "申请须为 1–5000 个字符，并包含有效的设备标识和申请回执。" }, 400);
   }
   const receiptHash = await digest(`receipt:${receipt}`, env.HASH_SALT);
   const existing = await load(id, env);
@@ -69,7 +69,7 @@ export async function handleApplication(request: Request, env: Env): Promise<Res
   const fingerprintHash = await digest(`fingerprint:${fingerprint}`, env.HASH_SALT);
   const now = new Date().toISOString();
   const application: Application = { id, receipt_hash: receiptHash, ip_hash: ipHash, fingerprint_hash: fingerprintHash,
-    day: beijingDay(), application_text: text, status: "reviewing", ai_approved: null, reason: null, error_code: null,
+    day: beijingDay(), application_text: text, status: "reviewing", reason: null, error_code: null,
     encrypted_invite: null, invite_code_hash: null, expires_at: null, issue_started_at: null, resolve_after: null, created_at: now, updated_at: now };
   try { await reserve(application, env); } catch (error) {
     const raced = await load(id, env);
@@ -81,19 +81,13 @@ export async function handleApplication(request: Request, env: Env): Promise<Res
     }
     throw error;
   }
-  let decision;
   try {
     if (await isDuplicate(text, env)) {
-      await finishBeforeCreation(id, "rejected", "申请与已通过内容过于相似，请独立说明个人需求。", "duplicate", env);
+      await finishBeforeCreation(id, "rejected", "申请与已有发码记录的内容过于相似，请独立说明个人需求。", "duplicate", env);
       return applicationResponse((await load(id, env))!, env);
     }
-    decision = await review(text, env);
   } catch {
-    await finishBeforeCreation(id, "failed", "审核服务暂不可用，本次不计入申请次数。", "review_unavailable", env);
-    return applicationResponse((await load(id, env))!, env);
-  }
-  if (!decision.approved) {
-    await finishBeforeCreation(id, "rejected", decision.reason, "review_rejected", env);
+    await finishBeforeCreation(id, "failed", "申请检查暂不可用，本次不计入申请次数。", "duplicate_check_unavailable", env);
     return applicationResponse((await load(id, env))!, env);
   }
   let token: string;
@@ -103,8 +97,8 @@ export async function handleApplication(request: Request, env: Env): Promise<Res
   }
   const started = new Date();
   // CAS is the only gateway to the non-idempotent upstream creation call.
-  const claimed = await env.DB.prepare(`UPDATE nw_applications SET status = 'creating', ai_approved = 1, reason = ?, issue_started_at = ?, resolve_after = ?, updated_at = ?
-    WHERE id = ? AND status = 'reviewing'`).bind(decision.reason, started.toISOString(),
+  const claimed = await env.DB.prepare(`UPDATE nw_applications SET status = 'creating', reason = ?, issue_started_at = ?, resolve_after = ?, updated_at = ?
+    WHERE id = ? AND status = 'reviewing'`).bind("申请检查通过。", started.toISOString(),
     new Date(started.getTime() + expiryHours(env) * 3600000 + 600000).toISOString(), started.toISOString(), id).run();
   if (claimed.meta.changes !== 1) return applicationResponse((await load(id, env))!, env);
   let invite: Invite;

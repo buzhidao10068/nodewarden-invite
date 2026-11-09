@@ -1,5 +1,5 @@
 -- NodeWarden invitation distributor. New names leave legacy NodeLoc tables untouched.
--- Run against a NEW D1 database. This file can be applied more than once.
+-- Use a dedicated invitation D1 database; this file can also be reapplied to upgrade it.
 CREATE TABLE IF NOT EXISTS nw_applications (
   id TEXT PRIMARY KEY,
   receipt_hash TEXT NOT NULL,
@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS nw_applications (
   day TEXT NOT NULL,
   application_text TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('reviewing','rejected','failed','creating','uncertain','succeeded')),
-  ai_approved INTEGER CHECK(ai_approved IN (0,1)),
   reason TEXT,
   error_code TEXT,
   encrypted_invite TEXT,
@@ -20,7 +19,7 @@ CREATE TABLE IF NOT EXISTS nw_applications (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS nw_applications_status ON nw_applications(status, created_at);
-CREATE INDEX IF NOT EXISTS nw_applications_approved ON nw_applications(ai_approved, id);
+CREATE INDEX IF NOT EXISTS nw_applications_dedup ON nw_applications(status, id);
 
 CREATE TABLE IF NOT EXISTS nw_daily_attempts (
   kind TEXT NOT NULL CHECK(kind IN ('ip','fingerprint')),
@@ -55,7 +54,7 @@ BEGIN
   SELECT RAISE(ABORT, 'nw_daily_quota_exhausted');
 END;
 
--- Fixed minute windows bound verification/AI costs; records expire logically, without Cron.
+-- Fixed minute windows bound verification/issuance costs; records expire logically, without Cron.
 CREATE TABLE IF NOT EXISTS nw_rate_limits (
   bucket TEXT NOT NULL,
   subject_hash TEXT NOT NULL,

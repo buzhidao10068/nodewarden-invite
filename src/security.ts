@@ -56,7 +56,7 @@ export async function validateConfig(request: Request, env: Env): Promise<void> 
     throw new Error("NODEWARDEN_URL must be an HTTPS origin");
   }
   if (!env.NODEWARDEN_CLIENT_ID?.startsWith("user.") || !env.NODEWARDEN_CLIENT_SECRET || !env.NODEWARDEN_MASTER_PASSWORD_HASH ||
-      !env.HASH_SALT || env.HASH_SALT.length < 32 || !env.AI_API_KEY || !env.AI_MODEL || new URL(env.AI_API_URL).protocol !== "https:") {
+      !env.HASH_SALT || env.HASH_SALT.length < 32) {
     throw new Error("Missing server configuration");
   }
   if (!isLocal(request, env) && (!env.TURNSTILE_SECRET || !env.TURNSTILE_SITE_KEY || !/^[a-zA-Z0-9_-]+$/.test(env.TURNSTILE_SITE_KEY))) {

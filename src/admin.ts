@@ -13,7 +13,7 @@ export async function adminRoute(request: Request, env: Env): Promise<Response> 
   const url = new URL(request.url);
   if (url.pathname === "/internal/applications" && request.method === "GET") {
     const offset = Math.max(0, Math.min(1000000, Number(url.searchParams.get("offset")) || 0));
-    const rows = await env.DB.prepare(`SELECT id, day, status, ai_approved, reason, error_code, expires_at, issue_started_at, resolve_after, created_at, updated_at
+    const rows = await env.DB.prepare(`SELECT id, day, status, reason, error_code, expires_at, issue_started_at, resolve_after, created_at, updated_at
       FROM nw_applications ORDER BY created_at DESC, id LIMIT 50 OFFSET ?`).bind(Math.floor(offset)).all();
     return json({ data: rows.results, nextOffset: offset + rows.results.length });
   }

@@ -16,8 +16,6 @@
   "vars": {
     "NODEWARDEN_URL": "https://vault.example.com",
     "NODEWARDEN_CLIENT_ID": "user.REPLACE_WITH_ADMIN_USER_ID",
-    "AI_API_URL": "https://api.openai.com/v1/chat/completions",
-    "AI_MODEL": "REPLACE_WITH_MODEL",
     "DAILY_INVITE_LIMIT": "3",
     "INVITE_EXPIRES_IN_HOURS": "1",
     "TURNSTILE_SITE_KEY": "REPLACE_WITH_TURNSTILE_SITE_KEY"

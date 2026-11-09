@@ -6,9 +6,6 @@ export interface Env {
   NODEWARDEN_MASTER_PASSWORD_HASH: string;
   DATA_ENCRYPTION_KEY: string;
   HASH_SALT: string;
-  AI_API_URL: string;
-  AI_API_KEY: string;
-  AI_MODEL: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   ADMIN_TOKEN?: string;
@@ -26,7 +23,6 @@ export interface Application {
   day: string;
   application_text: string;
   status: Status;
-  ai_approved: number | null;
   reason: string | null;
   error_code: string | null;
   encrypted_invite: string | null;
@@ -45,7 +41,6 @@ export interface Invite {
   status: string;
   usedBy: string | null;
 }
-export interface Decision { approved: boolean; reason: string }
 
 export function integer(value: string | undefined, fallback: number, max: number): number {
   if (value === undefined || value === "") return fallback;
