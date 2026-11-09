@@ -51,18 +51,12 @@ export function isLocal(request: Request, env: Env): boolean {
 }
 
 export async function validateConfig(request: Request, env: Env): Promise<void> {
-  const base = new URL(env.NODEWARDEN_URL);
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash || base.pathname !== "/") {
-    throw new Error("NODEWARDEN_URL must be an HTTPS origin");
-  }
-  if (!env.NODEWARDEN_CLIENT_ID?.startsWith("user.") || !env.NODEWARDEN_CLIENT_SECRET || !env.NODEWARDEN_MASTER_PASSWORD_HASH ||
-      !env.HASH_SALT || env.HASH_SALT.length < 32) {
+  if (!env.HASH_SALT || env.HASH_SALT.length < 32 || !env.ADMIN_TOKEN || env.ADMIN_TOKEN.length < 32) {
     throw new Error("Missing server configuration");
   }
   if (!isLocal(request, env) && (!env.TURNSTILE_SECRET || !env.TURNSTILE_SITE_KEY || !/^[a-zA-Z0-9_-]+$/.test(env.TURNSTILE_SITE_KEY))) {
     throw new Error("Turnstile is required outside local development");
   }
-  await encryptionKey(env);
 }
 
 export async function readBody(request: Request): Promise<Record<string, unknown>> {

@@ -3,25 +3,13 @@
   "name": "nodewarden-invite",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-30",
-  "observability": {
-    "enabled": true
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "nodewarden-invite",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
-    }
-  ],
-  "vars": {
-    "NODEWARDEN_URL": "https://vault.example.com",
-    "NODEWARDEN_CLIENT_ID": "user.REPLACE_WITH_ADMIN_USER_ID",
-    "DAILY_INVITE_LIMIT": "3",
-    "INVITE_EXPIRES_IN_HOURS": "1",
-    "TURNSTILE_SITE_KEY": "REPLACE_WITH_TURNSTILE_SITE_KEY"
-  },
-  "triggers": {
-    "crons": []
-  },
+  "observability": { "enabled": true },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "nodewarden-invite",
+    "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+  }],
+  "vars": { "TURNSTILE_SITE_KEY": "REPLACE_WITH_TURNSTILE_SITE_KEY" },
+  "triggers": { "crons": [] },
   "keep_vars": true
 }

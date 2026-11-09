@@ -1,13 +1,12 @@
-import { expiryHours, type Env, type Invite } from "./types.js";
-
-// A definite rejection happens before the upstream can write an invitation.
-// Network errors, 5xx (including audit failures after a write), and malformed 2xx are ambiguous.
-export class CreationError extends Error {
-  constructor(public readonly definite: boolean) { super("NodeWarden invitation creation failed"); }
-}
+import type { Env, Invite } from "./types.js";
 const sessions = new WeakMap<Env, { expiresAt: number; token: Promise<string> }>();
 
 export async function accessToken(env: Env): Promise<string> {
+  const base = new URL(env.NODEWARDEN_URL);
+  if (base.protocol !== "https:" || base.href.slice(8).split("/")[0].includes("@") || base.search || base.hash || base.pathname !== "/" ||
+      !env.NODEWARDEN_CLIENT_ID?.startsWith("user.") || !env.NODEWARDEN_CLIENT_SECRET || !env.NODEWARDEN_MASTER_PASSWORD_HASH) {
+    throw new Error("Missing NodeWarden administrator configuration");
+  }
   const cached = sessions.get(env);
   if (cached && cached.expiresAt > Date.now()) return cached.token;
   const entry = { expiresAt: Date.now() + 30000, token: Promise.resolve("") };
@@ -40,26 +39,6 @@ function parseInvite(value: unknown, env: Env): Invite {
   // Construct the link from the configured origin, never trust an upstream link's host.
   return { code: invite.code, inviteLink: `${new URL(env.NODEWARDEN_URL).origin}/?invite=${encodeURIComponent(invite.code)}`,
     expiresAt: invite.expiresAt, createdAt: invite.createdAt, status: invite.status, usedBy: invite.usedBy ?? null };
-}
-
-export async function createInvite(token: string, env: Env): Promise<Invite> {
-  let response: Response;
-  try {
-    response = await fetch(new URL("/api/admin/invites", env.NODEWARDEN_URL), {
-      method: "POST", redirect: "manual", signal: AbortSignal.timeout(20000),
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ expiresInHours: expiryHours(env), masterPasswordHash: env.NODEWARDEN_MASTER_PASSWORD_HASH }),
-    });
-  } catch { throw new CreationError(false); }
-  if (response.status === 401) sessions.delete(env);
-  // A rate limit or gateway response can race with an upstream write. Keep it
-  // ambiguous unless the request was definitely rejected by validation/auth.
-  if (!response.ok) throw new CreationError([400, 401, 403, 404, 405, 415, 422].includes(response.status));
-  try {
-    const invite = parseInvite(await response.json(), env);
-    if (invite.status !== "active" || invite.usedBy || Date.parse(invite.expiresAt) <= Date.now()) throw new Error("Invalid new invitation");
-    return invite;
-  } catch { throw new CreationError(false); }
 }
 
 async function adminRequest(path: string, method: string, env: Env): Promise<Response> {

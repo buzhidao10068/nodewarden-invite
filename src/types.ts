@@ -9,15 +9,15 @@ export interface Env {
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   ADMIN_TOKEN?: string;
-  DAILY_INVITE_LIMIT?: string;
-  INVITE_EXPIRES_IN_HOURS?: string;
   ALLOW_INSECURE_LOCAL_DEV?: string;
 }
 
+// Creation states are retained for records from the previous automatic version.
 export type Status = "reviewing" | "rejected" | "failed" | "creating" | "uncertain" | "succeeded";
 export interface Application {
   id: string;
-  receipt_hash: string;
+  email: string | null;
+  email_hash: string | null;
   ip_hash: string;
   fingerprint_hash: string;
   day: string;
@@ -41,12 +41,3 @@ export interface Invite {
   status: string;
   usedBy: string | null;
 }
-
-export function integer(value: string | undefined, fallback: number, max: number): number {
-  if (value === undefined || value === "") return fallback;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) throw new Error("Invalid numeric configuration");
-  return parsed;
-}
-export const dailyLimit = (env: Env) => integer(env.DAILY_INVITE_LIMIT, 3, 10000);
-export const expiryHours = (env: Env) => integer(env.INVITE_EXPIRES_IN_HOURS, 1, 720);

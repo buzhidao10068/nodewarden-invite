@@ -1,10 +1,10 @@
 // Derived from hekuo5310/nl-invite-auto (Apache-2.0).
-// Modified for NodeWarden, on-demand issuance and transaction-based reservations, 2026-11-09.
+// Modified for NodeWarden, manual email invitations without Cron, 2026-11-09.
 import { adminRoute } from "./admin.js";
-import { dailyStatus, handleApplication, statusRequest } from "./applications.js";
+import { handleApplication, statusRequest } from "./applications.js";
 import { page } from "./page.js";
 import { json, validateConfig } from "./security.js";
-import { dailyLimit, expiryHours, type Env } from "./types.js";
+import type { Env } from "./types.js";
 
 export type { Env } from "./types.js";
 export default {
@@ -18,19 +18,14 @@ export default {
         "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
       } });
       if (url.pathname.startsWith("/internal/")) return await adminRoute(request, env);
-      if (request.method === "GET" && url.pathname === "/api/daily-status") return await dailyStatus(env);
-      const status = url.pathname.match(/^\/api\/applications\/([a-f0-9-]{36})\/status$/i);
-      if (request.method === "POST" && status) return await statusRequest(request, status[1], env);
-      if (request.method === "POST" && url.pathname === "/api/applications") {
+      if (request.method === "POST" && ["/api/applications", "/api/applications/status"].includes(url.pathname)) {
         await validateConfig(request, env);
-        dailyLimit(env); expiryHours(env);
-        return await handleApplication(request, env);
+        return url.pathname.endsWith("/status") ? await statusRequest(request, env) : await handleApplication(request, env);
       }
       return new Response("Not found", { status: 404 });
     } catch {
-      // Do not include provider responses, bearer tokens, passwords or invitation codes in logs.
       console.error("Invitation service request failed");
-      return json({ message: "服务暂不可用；如已提交申请，请保留回执并稍后查询。" }, 503);
+      return json({ message: "服务暂不可用；如已提交申请，请稍后使用邮箱查询。" }, 503);
     }
   },
 } satisfies ExportedHandler<Env>;

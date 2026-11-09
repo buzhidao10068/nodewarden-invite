@@ -1,8 +1,8 @@
--- NodeWarden invitation distributor. New names leave legacy NodeLoc tables untouched.
--- Use a dedicated invitation D1 database; this file can also be reapplied to upgrade it.
+-- Dedicated invitation database; preserves existing applications and legacy columns.
+-- Reapply this entire file when upgrading from the previous automatic version.
 CREATE TABLE IF NOT EXISTS nw_applications (
   id TEXT PRIMARY KEY,
-  receipt_hash TEXT NOT NULL,
+  receipt_hash TEXT NOT NULL DEFAULT '',
   ip_hash TEXT NOT NULL,
   fingerprint_hash TEXT NOT NULL,
   day TEXT NOT NULL,
@@ -21,6 +21,15 @@ CREATE TABLE IF NOT EXISTS nw_applications (
 CREATE INDEX IF NOT EXISTS nw_applications_status ON nw_applications(status, created_at);
 CREATE INDEX IF NOT EXISTS nw_applications_dedup ON nw_applications(status, id);
 
+-- A separate table makes the upgrade repeatable without altering legacy rows.
+CREATE TABLE IF NOT EXISTS nw_application_emails (
+  application_id TEXT PRIMARY KEY REFERENCES nw_applications(id),
+  email TEXT NOT NULL,
+  email_hash TEXT NOT NULL,
+  active_email_hash TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS nw_application_emails_hash ON nw_application_emails(email_hash);
+
 CREATE TABLE IF NOT EXISTS nw_daily_attempts (
   kind TEXT NOT NULL CHECK(kind IN ('ip','fingerprint')),
   subject_hash TEXT NOT NULL,
@@ -28,7 +37,6 @@ CREATE TABLE IF NOT EXISTS nw_daily_attempts (
   application_id TEXT NOT NULL REFERENCES nw_applications(id),
   PRIMARY KEY(kind, subject_hash, day)
 );
--- Held during review/creation, including across midnight; retained forever after success.
 CREATE TABLE IF NOT EXISTS nw_eligibility (
   kind TEXT NOT NULL CHECK(kind IN ('ip','fingerprint')),
   subject_hash TEXT NOT NULL,
@@ -37,24 +45,11 @@ CREATE TABLE IF NOT EXISTS nw_eligibility (
 );
 CREATE INDEX IF NOT EXISTS nw_eligibility_application ON nw_eligibility(application_id);
 
-CREATE TABLE IF NOT EXISTS nw_daily_quota (
-  day TEXT PRIMARY KEY,
-  quota_limit INTEGER NOT NULL CHECK(quota_limit >= 1)
-);
-CREATE TABLE IF NOT EXISTS nw_quota_reservations (
-  application_id TEXT PRIMARY KEY REFERENCES nw_applications(id),
-  day TEXT NOT NULL REFERENCES nw_daily_quota(day)
-);
-CREATE INDEX IF NOT EXISTS nw_reservations_day ON nw_quota_reservations(day);
-CREATE TRIGGER IF NOT EXISTS nw_enforce_quota
-BEFORE INSERT ON nw_quota_reservations
-WHEN (SELECT COUNT(*) FROM nw_quota_reservations WHERE day = NEW.day) >=
-     (SELECT quota_limit FROM nw_daily_quota WHERE day = NEW.day)
-BEGIN
-  SELECT RAISE(ABORT, 'nw_daily_quota_exhausted');
-END;
+-- Retire only the old daily issuance accounting. Application history is kept.
+DROP TRIGGER IF EXISTS nw_enforce_quota;
+DROP TABLE IF EXISTS nw_quota_reservations;
+DROP TABLE IF EXISTS nw_daily_quota;
 
--- Fixed minute windows bound verification/issuance costs; records expire logically, without Cron.
 CREATE TABLE IF NOT EXISTS nw_rate_limits (
   bucket TEXT NOT NULL,
   subject_hash TEXT NOT NULL,
@@ -62,10 +57,10 @@ CREATE TABLE IF NOT EXISTS nw_rate_limits (
   count INTEGER NOT NULL,
   PRIMARY KEY(bucket, subject_hash, window)
 );
+CREATE INDEX IF NOT EXISTS nw_rate_limits_window ON nw_rate_limits(window);
 CREATE TABLE IF NOT EXISTS nw_admin_audit (
   id TEXT PRIMARY KEY,
   application_id TEXT NOT NULL REFERENCES nw_applications(id),
   action TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS nw_rate_limits_window ON nw_rate_limits(window);
