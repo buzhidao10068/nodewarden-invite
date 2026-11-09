@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nodewarden-invite",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-30",
+  "observability": {
+    "enabled": true
+  },
+  "keep_vars": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nodewarden-invite"
+    }
+  ],
+  "triggers": {
+    "crons": []
+  }
+}

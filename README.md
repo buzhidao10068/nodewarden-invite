@@ -18,21 +18,36 @@
 
 ## 配置和部署
 
-需要 Node.js 22 或更新的受支持版本、Cloudflare Workers / D1 账号，以及已经部署并能正常创建邀请码的 NodeWarden。以下命令在本仓库根目录运行。
+需要 Cloudflare Workers / D1 账号，以及已经部署并能正常创建邀请码的 NodeWarden。使用本地命令时还需要 Node.js 22 或更新的受支持版本，命令均在本仓库根目录运行。
 
-### 1. 安装依赖，创建独立 D1
+仓库已提交正式的 `wrangler.jsonc`，其中 `main: "src/index.ts"` 明确指定 Worker 入口。页面由 Worker 返回，不需要静态文件目录，也不需要填写 `dist` 或 `public` 输出目录。
+
+### 使用 Cloudflare 控制台从 GitHub 部署
+
+1. 在 **Workers & Pages → 创建应用 → 导入 Git 仓库** 中选择本 fork，使用 **Workers** 项目。
+2. 生产分支选择 `main`，项目根目录使用仓库根目录；Worker 名称应与 `wrangler.jsonc` 的 `name` 一致，默认 `nodewarden-invite`。
+3. **构建命令留空**，**部署命令填写 `npm run deploy`**（默认的 `npx wrangler deploy` 也可以）。不要使用 `wrangler pages deploy`，也不要设置静态资源输出目录。
+4. 首次部署时，Wrangler 会为 `DB` 绑定创建名为 `nodewarden-invite` 的 D1；如果账户内已有同名数据库，会连接该库。此名称应只用于本分发服务。也可以事先创建专用库并在配置中填写它的 `database_id`。
+5. 部署后，在 **Storage & Databases → D1 → nodewarden-invite → Console** 中执行仓库根目录 `schema.sql` 的建表 SQL。也可以使用下方本地命令执行。自动创建数据库不会自动建表。
+6. 在该 Worker 的 **Settings → Variables & Secrets** 中添加下文列出的公开变量和 7 个 Secret，再部署使设置生效。导入页面里的 **Build variables and secrets** 仅供构建使用，不能替代运行时配置。
+7. 在 Turnstile 控制台允许申请页实际使用的域名，完成真实实例测试后再开放领取。
+
+正式配置使用 `keep_vars: true`，且不包含站点配置的占位值，因此后续 Git 部署会保留控制台设置的运行时变量。密钥只放在控制台 Secret 或 Wrangler Secret 中。`wrangler.jsonc.example` 仅供查看完整字段，不是部署入口。
+
+如果遇到 `Could not detect a directory containing static files`，先确认部署的是包含正式 `wrangler.jsonc` 的最新提交，项目根目录正确，部署命令为上述 Workers 命令，然后重试部署。
+
+### 1. 本地命令部署：安装依赖，创建独立 D1
 
 ```powershell
 npm ci
-Copy-Item -LiteralPath wrangler.jsonc.example -Destination wrangler.jsonc
 npx wrangler login
 npx wrangler d1 create nodewarden-invite
 ```
 
-把创建结果中的 `database_id` 填进 `wrangler.jsonc` 的 `d1_databases`，保留 `binding: "DB"`。然后初始化远程数据库：
+如果已通过控制台或首次部署创建此库，跳过 `d1 create`。正式配置会按 `database_name` 找到该库；也可以在 `d1_databases` 中补上创建结果的 `database_id`，保留 `binding: "DB"`。然后初始化远程数据库：
 
 ```powershell
-npx wrangler d1 execute nodewarden-invite --remote --file=schema.sql
+npx wrangler d1 execute DB --remote --file=schema.sql
 ```
 
 这是**分发服务自己的全新 D1**，不要填写 NodeWarden 正在使用的数据库 ID。`schema.sql` 不迁移旧 NodeLoc 库存、领取记录和删除队列；已有旧服务需要自行处理未完成任务与历史限制，再切换到新服务。
@@ -51,7 +66,7 @@ npx wrangler d1 execute nodewarden-invite --remote --file=schema.sql
 
 ### 3. 填写公开配置和 Secret
 
-`wrangler.jsonc` 的 `vars` 配置如下；配置文件已被 `.gitignore` 忽略，但仍只放非敏感值：
+公开变量如下。Git 部署推荐在 Worker 的 **Settings → Variables & Secrets** 中添加类型为 **Text** 的变量；本地命令部署也可以填写正式 `wrangler.jsonc` 的 `vars`。正式配置会提交到 Git，只能放非敏感值；配置文件中的同名变量会覆盖控制台设置的值。
 
 | 配置 | 用途 / 默认值 |
 | --- | --- |
@@ -69,7 +84,7 @@ npx wrangler d1 execute nodewarden-invite --remote --file=schema.sql
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```
 
-逐项执行以下命令，在交互输入中粘贴对应值：
+控制台部署时，将以下 7 个名称及对应值添加到 Worker 的 **Settings → Variables & Secrets**，类型选择 **Secret**。使用本地命令时逐项执行，在交互输入中粘贴对应值：
 
 ```powershell
 npx wrangler secret put NODEWARDEN_CLIENT_SECRET
@@ -101,7 +116,7 @@ npm run deploy
 ```powershell
 Copy-Item -LiteralPath .dev.vars.example -Destination .dev.vars
 # 编辑 .dev.vars，填入测试实例的真实配置。
-npx wrangler d1 execute nodewarden-invite --local --file=schema.sql
+npx wrangler d1 execute DB --local --file=schema.sql
 npm run dev
 ```
 
